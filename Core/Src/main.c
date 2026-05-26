@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
 #include "iwdg.h"
 #include "rtc.h"
 #include "usart.h"
@@ -28,7 +29,7 @@
 #include "stdio.h"
 #include "math.h"
 #include "at_ml307c.h"
-#include "i2c_sw.h"
+#include "i2c.h"
 #include "lsm6ds.h"
 /* USER CODE END Includes */
 
@@ -55,8 +56,11 @@ uint32_t last_send_time = 0;          /* 上次发送时间 */
 #define SEND_INTERVAL_MS 50            /* 发送间隔（毫秒），对应20Hz高频上报 */
 float temp = 0.0f, humi = 0.0f;       /* 温湿度变量 */
 char json_buf[128];                   /* JSON数据缓冲区 */
-LSM6DS_RawData_t imu_raw;             /* IMU原始数据 */
-LSM6DS_FloatData_t imu_data;          /* IMU物理量数据 */
+
+/* IMU 物理量数据 */
+float acceleration_mg[3];
+float angular_rate_dps[3];
+char uart_log_buf[256];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -147,45 +151,58 @@ int main(void)
   MX_USART2_UART_Init();
   MX_IWDG_Init();
   MX_RTC_Init();
+  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
-  // 冻结独立看门狗在低功耗模式下的计数，防止休眠期间复位
-  __HAL_RCC_DBGMCU_CLK_ENABLE();
-  __HAL_DBGMCU_FREEZE_IWDG();
+  // I2C Scanner implementation using Hardware I2C (I2C2)
+  uint8_t msg[64];
+  uint8_t device_count = 0;
+  HAL_StatusTypeDef status;
   
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-
-  // USART2测试：发送欢迎消息
-  uint8_t welcome_msg[] = "USART2 Test Ready!\r\nBaud Rate: 115200\r\n";
-  HAL_UART_Transmit(&huart2, welcome_msg, sizeof(welcome_msg)-1, HAL_MAX_DELAY);
-
-  // 初始化 LSM6DS IMU传感器
-  HAL_UART_Transmit(&huart2, (uint8_t *)"Initializing LSM6DS...\r\n", 22, HAL_MAX_DELAY);
-#if USE_MOCK_IMU
-  HAL_UART_Transmit(&huart2, (uint8_t *)"Using MOCK IMU data\r\n", 20, HAL_MAX_DELAY);
-#else
-  if (LSM6DS_Init() == 1) {
-      HAL_UART_Transmit(&huart2, (uint8_t *)"LSM6DS initialized OK\r\n", 21, HAL_MAX_DELAY);
-      // 配置唤醒检测
-      LSM6DS_Config_Wakeup(0x10, 0x08);
-  } else {
-      HAL_UART_Transmit(&huart2, (uint8_t *)"LSM6DS init failed\r\n", 19, HAL_MAX_DELAY);
-  }
-#endif
-
-  // 初始化 ML307C 模组网络
-  HAL_UART_Transmit(&huart2, (uint8_t *)"Initializing ML307C...\r\n", 26, HAL_MAX_DELAY);
-  if (ML307C_Network_Init(NULL) == 1) {
-      HAL_UART_Transmit(&huart2, (uint8_t *)"Network initialized OK\r\n", 23, HAL_MAX_DELAY);
+  // 发送扫描开始提示
+  HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n=== Starting I2C Scanner (Hardware I2C2) ===\r\n", 46, 100);
+  
+  // // 遍历7位地址 0x01 到 0x7F
+  // for (uint16_t i = 1; i < 128; i++) {
+  //     // 检查设备是否就绪（使用硬件I2C，注意：HAL库需要将7位地址左移1位变为8位地址形式传入）
+  //     status = HAL_I2C_IsDeviceReady(&hi2c2, (uint16_t)(i << 1), 3, 1000);
       
-      // 连接 MQTT 服务器
-      HAL_UART_Transmit(&huart2, (uint8_t *)"Connecting to MQTT broker...\r\n", 30, HAL_MAX_DELAY);
-      if (ML307C_MQTT_Connect("broker.emqx.io", 1883, NULL, NULL) == 1) {
-          HAL_UART_Transmit(&huart2, (uint8_t *)"MQTT connected OK\r\n", 18, HAL_MAX_DELAY);
-      } else {
-          HAL_UART_Transmit(&huart2, (uint8_t *)"MQTT connect failed\r\n", 20, HAL_MAX_DELAY);
-      }
+  //     if (status == HAL_OK) {
+  //         sprintf((char*)msg, "Device found at 7-bit address: 0x%02X (8-bit: 0x%02X)\r\n", i, (i << 1));
+  //         HAL_UART_Transmit(&huart2, msg, strlen((char*)msg), 100);
+  //         device_count++;
+  //     } else if (status == HAL_BUSY) {
+  //         // 总线处于忙状态 - SCL或SDA被拉低或短路
+  //         sprintf((char*)msg, "Addr 0x%02X: I2C Bus BUSY! (Short detected)\r\n", i);
+  //         HAL_UART_Transmit(&huart2, msg, strlen((char*)msg), 100);
+  //     } else if (status == HAL_TIMEOUT) {
+  //         // 超时未响应 - 芯片未应答
+  //         sprintf((char*)msg, "Addr 0x%02X: I2C Timeout! (No response)\r\n", i);
+  //         HAL_UART_Transmit(&huart2, msg, strlen((char*)msg), 100);
+  //     } else if (status == HAL_ERROR) {
+  //         // 硬件错误（未收到ACK）
+  //         sprintf((char*)msg, "Addr 0x%02X: I2C Error (No ACK)!\r\n", i);
+  //         HAL_UART_Transmit(&huart2, msg, strlen((char*)msg), 100);
+  //     }
+  // }
+  
+  // 输出扫描结果
+  if (device_count == 0) {
+      HAL_UART_Transmit(&huart2, (uint8_t*)"No I2C devices found.\r\n", 23, 100);
   } else {
-      HAL_UART_Transmit(&huart2, (uint8_t *)"Network init failed\r\n", 21, HAL_MAX_DELAY);
+      sprintf((char*)msg, "Scan finished. Total devices found: %d\r\n", device_count);
+      HAL_UART_Transmit(&huart2, msg, strlen((char*)msg), 100);
+  }
+  
+  HAL_UART_Transmit(&huart2, (uint8_t*)"I2C Scan Complete.\r\n", 20, 100);
+
+  /* IMU 模块化初始化 */
+  if (LSM6DS_Init(&hi2c2) == 1) {
+      HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] IMU Module Initialized Successfully!\r\n", 44, 100);
+
+      LSM6DS_Config_Wakeup(60, 0);
+      HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] 6D Wakeup Armed! Ready for Multimeter Test.\r\n", 51, 100);
+  } else {
+      HAL_UART_Transmit(&huart2, (uint8_t*)"[CRITICAL] IMU Module Initialization Failed!\r\n", 46, 100);
   }
 
   /* USER CODE END 2 */
@@ -197,13 +214,18 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // 执行低功耗进入与唤醒测试（Stop模式已注释）
-    // LowPower_Stop1_Test();
-    
-    // 正常运行模式：周期性喂狗和心跳输出
-    HAL_UART_Transmit(&huart2, (uint8_t *)"[MODE] Normal operation mode\r\n", 30, HAL_MAX_DELAY);
-    HAL_IWDG_Refresh(&hiwdg);  // 喂狗
-    HAL_Delay(1000);           // 1秒周期
+    /*
+    if (LSM6DS_Read_Storage(acceleration_mg, angular_rate_dps) == 1)
+    {
+        sprintf(uart_log_buf, "ACC[mg]: X:%6.1f Y:%6.1f Z:%6.1f | GYR[dps]: X:%5.1f Y:%5.1f Z:%5.1f\r\n",
+                acceleration_mg[0], acceleration_mg[1], acceleration_mg[2],
+                angular_rate_dps[0], angular_rate_dps[1], angular_rate_dps[2]);
+        HAL_UART_Transmit(&huart2, (uint8_t*)uart_log_buf, strlen(uart_log_buf), 100);
+    }
+    */
+
+    HAL_IWDG_Refresh(&hiwdg);
+    HAL_Delay(500);
   }
   /* USER CODE END 3 */
 }

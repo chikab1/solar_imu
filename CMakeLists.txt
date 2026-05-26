@@ -75,9 +75,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 加入用户自定义的源文件（排除已被stm32cubemx处理的文件）
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/Core/Src/i2c_sw.c
     ${CMAKE_SOURCE_DIR}/Core/Src/at_ml307c.c
     ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds3tr-c_reg.c
 )
 
 #浮点数支持

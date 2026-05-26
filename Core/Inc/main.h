@@ -60,10 +60,6 @@ void Error_Handler(void);
 #define IMU_INT1_WAKEUP_Pin GPIO_PIN_0
 #define IMU_INT1_WAKEUP_GPIO_Port GPIOA
 #define IMU_INT1_WAKEUP_EXTI_IRQn EXTI0_1_IRQn
-#define SW_I2C_SCL_Pin GPIO_PIN_11
-#define SW_I2C_SCL_GPIO_Port GPIOA
-#define SW_I2C_SDA_Pin GPIO_PIN_12
-#define SW_I2C_SDA_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
