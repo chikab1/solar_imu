@@ -57,9 +57,13 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define IMU_INT1_WAKEUP_Pin GPIO_PIN_0
-#define IMU_INT1_WAKEUP_GPIO_Port GPIOA
+#define IMU_INT1_WAKEUP_Pin GPIO_PIN_1
+#define IMU_INT1_WAKEUP_GPIO_Port GPIOB
 #define IMU_INT1_WAKEUP_EXTI_IRQn EXTI0_1_IRQn
+#define LTE_PWRKEY_Pin GPIO_PIN_4
+#define LTE_PWRKEY_GPIO_Port GPIOB
+#define LTE_STATE_Pin GPIO_PIN_8
+#define LTE_STATE_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

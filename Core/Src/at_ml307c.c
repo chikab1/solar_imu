@@ -11,6 +11,8 @@
 /* USER CODE END Header */
 
 #include "at_ml307c.h"
+#include "main.h"
+#include "iwdg.h"
 
 /* Private variables ---------------------------------------------------------*/
 static uint8_t s_uart_rx_buf[ML307C_MAX_BUF_SIZE];  /* UART 接收缓冲区 */
@@ -253,7 +255,7 @@ int ML307C_GPS_Parse(char *uart_rx_buf, ML307C_GPS_Data_t *gps_data)
 int ML307C_MQTT_Connect(char *broker_url, int port, char *username, char *password)
 {
     char cmd_buf[384];
-    
+
     /* 参数校验 */
     if (broker_url == NULL || port <= 0 || port > 65535) {
         return 0;
@@ -272,16 +274,16 @@ int ML307C_MQTT_Connect(char *broker_url, int port, char *username, char *passwo
     /* 规范第21页：构建中移官方标准的连接指令，绝不带多余的会话和时间参数 */
     if (username != NULL && password != NULL) {
         // 带账号密码的私密连接格式
-        snprintf(cmd_buf, sizeof(cmd_buf), 
-                 "AT+MQTTCONN=0,\"%s\",%d,\"stm32_client_xyz\",\"%s\",\"%s\"", 
+        snprintf(cmd_buf, sizeof(cmd_buf),
+                 "AT+MQTTCONN=0,\"%s\",%d,\"stm32_client_xyz\",\"%s\",\"%s\"",
                  broker_url, port, username, password);
     } else {
         // 纯匿名连接格式（当前连公共免费测试服务器用）
-        snprintf(cmd_buf, sizeof(cmd_buf), 
-                 "AT+MQTTCONN=0,\"%s\",%d,\"stm32_client_xyz\"", 
+        snprintf(cmd_buf, sizeof(cmd_buf),
+                 "AT+MQTTCONN=0,\"%s\",%d,\"stm32_client_xyz\"",
                  broker_url, port);
     }
-    
+
     /* 发送连接指令。手册第21页注明成功后会立刻响应 OK，后续异步上报连接状态 */
     /* 给予模组充足的 12000 毫秒时间与公网服务器进行握手 */
     return ML307C_Send_CMD(cmd_buf, "OK", 12000);
@@ -298,7 +300,7 @@ int ML307C_MQTT_Publish(char *topic, char *payload)
 {
     char cmd_buf[512];
     int actual_len;
-    
+
     /* 参数校验 */
     if (topic == NULL || payload == NULL) {
         return 0;
@@ -364,5 +366,126 @@ static int ML307C_Receive_Data(uint32_t timeout_ms)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+ * @brief  构建传感器数据 JSON 并通过 MQTT 发布（IMU + GPS 复合包）
+ * @param  acc_mg: 加速度计数据 (mg)，长度 3 [X, Y, Z]
+ * @param  gyro_dps: 陀螺仪数据 (dps)，长度 3 [X, Y, Z]
+ * @param  gps_data: GPS 数据结构体指针（可为 NULL，仅发送 IMU）
+ * @param  topic: MQTT 目标主题
+ * @retval 1-发送成功，0-失败
+ */
+int ML307C_Send_SensorData(float *acc_mg, float *gyro_dps,
+                           ML307C_GPS_Data_t *gps_data, char *topic)
+{
+    char json_buf[512];
+    int len;
+
+    /* 参数校验 */
+    if (acc_mg == NULL || gyro_dps == NULL || topic == NULL) {
+        return 0;
+    }
+
+    /* 构建紧凑 JSON 字符串 */
+    if (gps_data != NULL) {
+        len = snprintf(json_buf, sizeof(json_buf),
+                       "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
+                       "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
+                       "\"lat\":%.6f,\"lon\":%.6f,"
+                       "\"sat\":%d,\"fix\":%d}",
+                       acc_mg[0], acc_mg[1], acc_mg[2],
+                       gyro_dps[0], gyro_dps[1], gyro_dps[2],
+                       gps_data->latitude, gps_data->longitude,
+                       gps_data->satellites, gps_data->is_fixed);
+    } else {
+        len = snprintf(json_buf, sizeof(json_buf),
+                       "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
+                       "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f}",
+                       acc_mg[0], acc_mg[1], acc_mg[2],
+                       gyro_dps[0], gyro_dps[1], gyro_dps[2]);
+    }
+
+    /* 检查 JSON 是否被截断 */
+    if (len < 0 || len >= (int)sizeof(json_buf)) {
+        return 0;
+    }
+
+    /* 通过 MQTT 发布 */
+    return ML307C_MQTT_Publish(topic, json_buf);
+}
+
+/**
+ * @brief  ML307C 4G 模组硬件开机脉冲控制
+ * @note   拉高 PB4 (三极管导通→PWKEY拉低 1.5s→释放)，模组上电启动
+ * @retval 无
+ */
+void Turn_On_ML307C(void)
+{
+    // 1. 产生开机脉冲：拉高 PB4 (三极管导通，PWKEY 变低)
+    HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_SET);
+
+    // 2. 维持开机低电平脉冲宽度（中移规范要求 1.2s ~ 2s，这里给 1.5 秒最稳妥）
+    HAL_Delay(1500);
+
+    // 3. 释放开机脚：拉低 PB4 (三极管截止，PWKEY 恢复高电平)
+    HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_RESET);
+
+    // 4. 此时模组已经开始内部热启动，后面可以去循环读取新连好的 STATE 脚，等待它变高电平
+}
+
+/**
+ * @brief  ML307C 4G 模组 AT 指令关机
+ * @note   发送 AT+MPOF=0 使模组正常关机下线
+ * @retval 无
+ */
+void Turn_Off_ML307C(void)
+{
+    /* ---- Step 1：发送软件关机指令 ---- */
+    char *cmd = "AT+MPOF=0\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] Sending AT+MPOF=0...\r\n", 29, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)cmd, strlen(cmd), 100);
+
+    /* ---- Step 2：读取 STATE 引脚当前状态 ---- */
+    GPIO_PinState state = HAL_GPIO_ReadPin(LTE_STATE_GPIO_Port, LTE_STATE_Pin);
+    if (state == GPIO_PIN_SET) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE=HIGH, waiting for LOW...\r\n", 40, 100);
+    } else {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE=LOW (already off?)\r\n", 34, 100);
+        return;
+    }
+
+    /* ---- Step 3：死守 STATE 引脚 + 超时保护 + 独立喂狗 ---- */
+    uint32_t start_time = HAL_GetTick();
+    uint32_t last_log   = 0;
+
+    while (HAL_GPIO_ReadPin(LTE_STATE_GPIO_Port, LTE_STATE_Pin) == GPIO_PIN_SET)
+    {
+        /* 喂狗：防止等待期间 IWDG 超时复位 */
+        HAL_IWDG_Refresh(&hiwdg);
+
+        /* 每 500ms 打一次心跳日志 */
+        if (HAL_GetTick() - last_log >= 500U) {
+            uint32_t elapsed = HAL_GetTick() - start_time;
+            char buf[32];
+            int len = snprintf(buf, sizeof(buf), "[OFF] Waiting... %lums\r\n", (unsigned long)elapsed);
+            HAL_UART_Transmit(&huart2, (uint8_t *)buf, len, 100);
+            last_log = HAL_GetTick();
+        }
+
+        /* 超时保护：5 秒后强制退出 */
+        if (HAL_GetTick() - start_time > 5000U) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] TIMEOUT! STATE still HIGH after 5s.\r\n", 48, 100);
+            break;
+        }
+    }
+
+    /* ---- Step 4：最终确认 ---- */
+    state = HAL_GPIO_ReadPin(LTE_STATE_GPIO_Port, LTE_STATE_Pin);
+    if (state == GPIO_PIN_RESET) {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE=LOW. Module powered off OK!\r\n", 43, 100);
+    } else {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE still HIGH. Module may be stuck!\r\n", 47, 100);
+    }
+}
 
 /* USER CODE END 1 */

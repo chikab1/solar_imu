@@ -46,7 +46,7 @@ void MX_RTC_Init(void)
   hrtc.Instance = RTC;
   hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
   hrtc.Init.AsynchPrediv = 127;
-  hrtc.Init.SynchPrediv = 249;
+  hrtc.Init.SynchPrediv = 255;
   hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
   hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
   hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
@@ -85,7 +85,7 @@ void MX_RTC_Init(void)
 
   /** Enable the WakeUp
   */
-  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 0, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
+  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 19999, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
   {
     Error_Handler();
   }
@@ -120,7 +120,7 @@ void HAL_RTC_MspInit(RTC_HandleTypeDef* rtcHandle)
     __HAL_RCC_RTCAPB_CLK_ENABLE();
 
     /* RTC interrupt Init */
-    HAL_NVIC_SetPriority(RTC_TAMP_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(RTC_TAMP_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(RTC_TAMP_IRQn);
   /* USER CODE BEGIN RTC_MspInit 1 */
 

@@ -108,6 +108,31 @@ char* ML307C_Get_RxBuffer(void);
  */
 void ML307C_Clear_Buffer(void);
 
+/**
+ * @brief  构建传感器数据 JSON 并通过 MQTT 发布（IMU + GPS 复合包）
+ * @param  acc_mg: 加速度计数据 (mg)，长度 3 [X, Y, Z]
+ * @param  gyro_dps: 陀螺仪数据 (dps)，长度 3 [X, Y, Z]
+ * @param  gps_data: GPS 数据结构体指针（可为 NULL，仅发送 IMU）
+ * @param  topic: MQTT 目标主题
+ * @retval 1-发送成功，0-失败
+ */
+int ML307C_Send_SensorData(float *acc_mg, float *gyro_dps,
+                           ML307C_GPS_Data_t *gps_data, char *topic);
+
+/**
+ * @brief  ML307C 4G 模组硬件开机脉冲控制
+ * @note   拉高 PB4 (三极管导通→PWKEY拉低 1.5s→释放)，模组上电启动
+ * @retval 无
+ */
+void Turn_On_ML307C(void);
+
+/**
+ * @brief  ML307C 4G 模组 AT 指令关机
+ * @note   发送 AT+MPOF=0 使模组正常关机下线
+ * @retval 无
+ */
+void Turn_Off_ML307C(void);
+
 #ifdef __cplusplus
 }
 #endif

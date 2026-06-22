@@ -78,6 +78,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/Src/at_ml307c.c
     ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds.c
     ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds3tr-c_reg.c
+
 )
 
 #浮点数支持
