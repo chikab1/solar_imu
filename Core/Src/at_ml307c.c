@@ -15,13 +15,16 @@
 #include "iwdg.h"
 
 /* Private variables ---------------------------------------------------------*/
-static uint8_t s_uart_rx_buf[ML307C_MAX_BUF_SIZE];  /* UART 接收缓冲区 */
-static uint16_t s_rx_buf_len = 0;                   /* 接收缓冲区数据长度 */
+// [已注释: MQTT/GPS函数未使用] static uint8_t s_uart_rx_buf[ML307C_MAX_BUF_SIZE];
+// [已注释: MQTT/GPS函数未使用] static uint16_t s_rx_buf_len = 0;
 
 /* Private function prototypes -----------------------------------------------*/
-static int ML307C_Receive_Data(uint32_t timeout_ms);
+// [已注释] static int ML307C_Receive_Data(uint32_t timeout_ms);
 
 /* Exported functions --------------------------------------------------------*/
+/* ====== 以下 MQTT/GPS/AT引擎函数暂未使用，已注释以节省 Flash ====== */
+
+#if 0  /* --- BEGIN: 未使用的 AT 引擎函数 --- */
 
 /**
  * @brief  发送 AT 指令并等待期望响应（带超时）
@@ -365,7 +368,11 @@ static int ML307C_Receive_Data(uint32_t timeout_ms)
     return 0;  /* 超时 */
 }
 
+#endif /* --- END: 未使用的 AT 引擎函数 --- */
+
 /* USER CODE BEGIN 1 */
+
+#if 0 /* --- BEGIN: 未使用的 MQTT/GPS 上报函数 --- */
 
 /**
  * @brief  构建传感器数据 JSON 并通过 MQTT 发布（IMU + GPS 复合包）
@@ -413,6 +420,8 @@ int ML307C_Send_SensorData(float *acc_mg, float *gyro_dps,
     /* 通过 MQTT 发布 */
     return ML307C_MQTT_Publish(topic, json_buf);
 }
+
+#endif /* --- END: 未使用的 MQTT/GPS 上报函数 --- */
 
 /**
  * @brief  ML307C 4G 模组硬件开机脉冲控制
@@ -474,7 +483,11 @@ void Turn_Off_ML307C(void)
 
         /* 超时保护：5 秒后强制退出 */
         if (HAL_GetTick() - start_time > 5000U) {
-            HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] TIMEOUT! STATE still HIGH after 5s.\r\n", 48, 100);
+            HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] TIMEOUT! Hardware RESET...\r\n", 36, 100);
+            /* 硬件绝杀：拉高 PB3 (RESET) 100ms 强制复位模组 */
+            HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_SET);
+            HAL_Delay(100);
+            HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_RESET);
             break;
         }
     }
@@ -484,7 +497,10 @@ void Turn_Off_ML307C(void)
     if (state == GPIO_PIN_RESET) {
         HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE=LOW. Module powered off OK!\r\n", 43, 100);
     } else {
-        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE still HIGH. Module may be stuck!\r\n", 47, 100);
+        HAL_UART_Transmit(&huart2, (uint8_t*)"[OFF] STATE still HIGH. Forcing RESET...\r\n", 44, 100);
+        HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_SET);
+        HAL_Delay(100);
+        HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_RESET);
     }
 }
 

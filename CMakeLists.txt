@@ -81,7 +81,4 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 )
 
-#浮点数支持
-target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
-    -u _printf_float
-)
+# 浮点数 printf 已移除 (MQTT/GPS函数已注释，无浮点格式化需求)

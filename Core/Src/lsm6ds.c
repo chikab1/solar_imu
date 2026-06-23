@@ -366,3 +366,86 @@ uint8_t LSM6DS_Clear_6D_Wakeup(void)
 
     return (all_sources.d6d_src.d6d_ia != 0U) ? 1U : 0U;
 }
+
+/**
+  * @brief  工业级双重复合门卫：WAKE-UP + 6D 双中断源路由到 INT1
+  * @retval 1-成功, 0-失败
+  */
+uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
+{
+    lsm6ds3tr_c_int1_route_t int1_route = {0};
+    lsm6ds3tr_c_tap_cfg_t     tap_cfg;
+
+    /* ---- WAKE-UP mg → 寄存器值映射 ---- *
+     *  ±2g 满量程: 每步 = 2000mg / 64 = 31.25mg          *
+     *  wu_mg / 31.25 → 四舍五入, 钳位 0~63               */
+    uint8_t wu_reg = (uint8_t)(((uint32_t)wu_mg * 10 + 156) / 312);
+    if (wu_reg > 63) wu_reg = 63;
+
+    /* ---- 6D 角度 → 硬件档位映射 ---- *
+     *  硬件仅 4 档 (~10°/20°/30°/40°), 就近匹配          */
+    lsm6ds3tr_c_sixd_ths_t deg_val;
+    if      (deg_6d <= 15) deg_val = LSM6DS3TR_C_DEG_80;   /* ~10° */
+    else if (deg_6d <= 25) deg_val = LSM6DS3TR_C_DEG_70;   /* ~20° */
+    else if (deg_6d <= 35) deg_val = LSM6DS3TR_C_DEG_60;   /* ~30° */
+    else                   deg_val = LSM6DS3TR_C_DEG_50;   /* ~40° */
+
+    /* 1. INT1: 推挽、高有效、锁存 */
+    if (lsm6ds3tr_c_pin_mode_set(&imu_ctx, LSM6DS3TR_C_PUSH_PULL) != 0 ||
+        lsm6ds3tr_c_pin_polarity_set(&imu_ctx, LSM6DS3TR_C_ACTIVE_HIGH) != 0 ||
+        lsm6ds3tr_c_int_notification_set(&imu_ctx, LSM6DS3TR_C_INT_LATCHED) != 0) {
+        return 0;
+    }
+
+    /* 2. 全局中断使能 */
+    if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
+                             (uint8_t *)&tap_cfg, 1) != 0) return 0;
+    tap_cfg.interrupts_enable = 1;
+    if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
+                              (uint8_t *)&tap_cfg, 1) != 0) return 0;
+
+    /* 3. WAKE-UP */
+    if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
+        lsm6ds3tr_c_wkup_dur_set(&imu_ctx, 0) != 0) return 0;
+
+    /* 4. 6D: 4D关闭, 低通使能 */
+    if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, deg_val) != 0 ||
+        lsm6ds3tr_c_4d_mode_set(&imu_ctx, 0) != 0 ||
+        lsm6ds3tr_c_6d_feed_data_set(&imu_ctx, LSM6DS3TR_C_LPF2_FEED) != 0) return 0;
+
+    /* 5. 双通道路由 INT1 */
+    if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
+    int1_route.int1_wu = 1;
+    int1_route.int1_6d = 1;
+    if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
+
+    /* 6. 清残留 */
+    { uint8_t _wu, _6d; LSM6DS_Clear_All_Interrupts_Ex(&_wu, &_6d); }
+
+    return 1;
+}
+
+/**
+  * @brief  读清 WAKE-UP + 6D 中断源锁存，返回各通道触发情况
+  * @note   直接读两个关键寄存器，避免 all_sources_get 长链中的 I2C 失败
+  * @param  out_wu:  输出 WAKE-UP 触发标志 (1=触发)
+  * @param  out_6d:  输出 6D 触发标志 (1=触发)
+  */
+void LSM6DS_Clear_All_Interrupts_Ex(uint8_t *out_wu, uint8_t *out_6d)
+{
+    lsm6ds3tr_c_wake_up_src_t wu_src;
+    lsm6ds3tr_c_d6d_src_t     d6d_src;
+
+    *out_wu = 0;
+    *out_6d = 0;
+
+    if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_WAKE_UP_SRC,
+                             (uint8_t *)&wu_src, 1) == 0) {
+        if (wu_src.wu_ia != 0U) *out_wu = 1;
+    }
+
+    if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_D6D_SRC,
+                             (uint8_t *)&d6d_src, 1) == 0) {
+        if (d6d_src.d6d_ia != 0U) *out_6d = 1;
+    }
+}

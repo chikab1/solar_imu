@@ -49,20 +49,27 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|LTE_PWRKEY_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : PB0 LTE_PWRKEY_Pin */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|LTE_PWRKEY_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOB, LTE_RESET_Pin|LTE_PWRKEY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : IMU_INT1_WAKEUP_Pin */
   GPIO_InitStruct.Pin = IMU_INT1_WAKEUP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(IMU_INT1_WAKEUP_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LTE_RESET_Pin */
+  GPIO_InitStruct.Pin = LTE_RESET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LTE_RESET_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LTE_PWRKEY_Pin */
+  GPIO_InitStruct.Pin = LTE_PWRKEY_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LTE_PWRKEY_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LTE_STATE_Pin */
   GPIO_InitStruct.Pin = LTE_STATE_Pin;
