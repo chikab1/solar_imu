@@ -13,3 +13,9 @@
 整版测试：1.IMU唤醒 6D和wake-up共同唤醒stop1低功耗模式通过
 
 2.ADC采集锂电池电压完成。
+
+2026.7.8
+
+第二版PCB到达，修改micro sim卡为nano sim卡，将USB 5V引入太阳能充电芯片。
+
+完成ML307C模块通过MQTT协议发送数据到腾讯云的EMQX服务器，最终在PC端的MQTTX上接收到对应的数据。

@@ -2,13 +2,14 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : 智能路牌：3态低功耗防盗固件 + 串口指令系统
+  * @brief          : 智能路牌 低功耗固件 (DMA串口)
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dma.h"
 #include "i2c.h"
 #include "iwdg.h"
 #include "rtc.h"
@@ -20,6 +21,7 @@
 #include "math.h"
 #include "lsm6ds.h"
 #include "at_ml307c.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,11 +34,11 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* ===== 双门卫阈值 (修改此处即可调参，无需改其他代码) ===== */
-#define GATEKEEPER_WU_MG      300   /* WAKE-UP: 0~1968 mg, 填物理量                     */
-#define GATEKEEPER_6D_DEG     30    /* 6D: 填入期望角度°, 自动映射最近硬件档 (~10/20/30/40°) */
+#define GATEKEEPER_WU_MG      300
+#define GATEKEEPER_6D_DEG     30
 
-#define RB_SIZE               128
+#define USART1_RX_BUF_SIZE    512    /* USART1 DMA接收缓冲 (4G模组) */
+#define USART2_RX_BUF_SIZE    256    /* USART2 IT接收缓冲  (PC指令) */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,24 +49,15 @@ typedef enum {
 
 /* USER CODE BEGIN PV */
 
-/* ---------- 系统状态 ---------- */
 static SystemState_t g_sys_state = STATE_IDLE;
 
-/* ---------- 透传环形缓冲区 ---------- */
-static uint8_t rb_pc2gsm[RB_SIZE];
-static uint8_t rb_gsm2pc[RB_SIZE];
-static volatile uint8_t rb_pc2gsm_head = 0;
-static volatile uint8_t rb_pc2gsm_tail = 0;
-static volatile uint8_t rb_gsm2pc_head = 0;
-static volatile uint8_t rb_gsm2pc_tail = 0;
-static uint8_t pc_rx_byte  = 0;
-static uint8_t gsm_rx_byte = 0;
+/* 命令队列 (中断设标志, 主循环执行) */
+typedef enum { CMD_NONE = 0, CMD_ON, CMD_OFF, CMD_SLEEP, CMD_VBAT, CMD_MQTT, CMD_TEST } PendingCmd_t;
+static volatile PendingCmd_t g_pending_cmd = CMD_NONE;
 
-/* ---------- 命令拦截状态机 ---------- */
-static uint8_t  cmd_state       = 0;
-static uint8_t  cmd_pending[8]  = {0};
-static uint8_t  cmd_pending_cnt = 0;
-static uint32_t cmd_last_tick   = 0;
+/* DMA/IT 接收缓冲区 */
+static uint8_t usart1_rx_buf[USART1_RX_BUF_SIZE] __attribute__((aligned(4)));
+static uint8_t usart2_rx_buf[USART2_RX_BUF_SIZE] __attribute__((aligned(4)));
 
 /* USER CODE END PV */
 
@@ -72,171 +65,47 @@ static uint32_t cmd_last_tick   = 0;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 static void Enter_Stop1_Mode(void);
-static void Passthrough_Drain_With_Cmds(void);
+static void Process_PC_Command(const uint8_t *data, uint16_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 /**
-  * @brief  透传排空 + 命令拦截 (!OFF / !ON / !SLEEP)
+  * @brief  处理 PC 发来的指令 (整行匹配)
   */
-static void Passthrough_Drain_With_Cmds(void)
+static void Process_PC_Command(const uint8_t *data, uint16_t len)
 {
-  /* 超时保护：命令半截卡住超过 500ms → 清空 */
-  if (cmd_state > 0 && HAL_GetTick() - cmd_last_tick > 500U) {
-    for (uint8_t i = 0; i < cmd_pending_cnt; i++) {
-      HAL_UART_Transmit(&huart1, &cmd_pending[i], 1, 10);
-    }
-    cmd_state = 0;  cmd_pending_cnt = 0;
+  /* 去掉尾部 \r\n */
+  while (len > 0 && (data[len-1] == '\r' || data[len-1] == '\n')) len--;
+  if (len == 0) return;
+
+  if (len == 3 && data[0] == '!' && data[1] == 'O' && data[2] == 'N') {
+    g_pending_cmd = CMD_ON;
   }
-
-  /* PC→模组：逐字节处理，边转发边检测命令 */
-  while (rb_pc2gsm_tail != rb_pc2gsm_head)
-  {
-    uint8_t ch = rb_pc2gsm[rb_pc2gsm_tail];
-    rb_pc2gsm_tail = (rb_pc2gsm_tail + 1) % RB_SIZE;
-    uint8_t handled = 0;
-
-    /* 状态 0: 等待 '!' */
-    if (cmd_state == 0 && ch == '!') {
-      cmd_pending[0] = ch;  cmd_pending_cnt = 1;  cmd_state = 1;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 1 (!): 等 O/S/V */
-    else if (cmd_state == 1) {
-      if (ch == 'O') {
-        cmd_pending[1] = ch;  cmd_pending_cnt = 2;  cmd_state = 2;
-        cmd_last_tick = HAL_GetTick();  handled = 1;
-      } else if (ch == 'S' || ch == 's') {
-        cmd_pending[1] = ch;  cmd_pending_cnt = 2;  cmd_state = 20;
-        cmd_last_tick = HAL_GetTick();  handled = 1;
-      } else if (ch == 'V' || ch == 'v') {
-        cmd_pending[1] = ch;  cmd_pending_cnt = 2;  cmd_state = 30;
-        cmd_last_tick = HAL_GetTick();  handled = 1;
-      }
-    }
-    /* 状态 2 (!O): 等 'F'/'N' → !OFF/!ON */
-    else if (cmd_state == 2) {
-      if (ch == 'F') {
-        cmd_pending[2] = ch;  cmd_pending_cnt = 3;  cmd_state = 3;
-        cmd_last_tick = HAL_GetTick();  handled = 1;
-      } else if (ch == 'N' || ch == 'n') {
-        cmd_pending[2] = ch;  cmd_pending_cnt = 3;  cmd_state = 10;
-        cmd_last_tick = HAL_GetTick();  handled = 1;
-      }
-    }
-    /* 状态 3 (!OF): 等 'F' */
-    else if (cmd_state == 3 && ch == 'F') {
-      cmd_pending[3] = ch;  cmd_pending_cnt = 4;  cmd_state = 4;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 4/10: !OFF 或 !ON 等 \r \n */
-    else if ((cmd_state == 4 || cmd_state == 10) && (ch == '\r' || ch == '\n'))
-    {
-      if (cmd_state == 4) {
-        HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !OFF running...\r\n", 24, 100);
-        Turn_Off_ML307C();
-      } else {
-        HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !ON running...\r\n", 23, 100);
-        Turn_On_ML307C();
-      }
-      if (ch == '\r' && rb_pc2gsm_tail != rb_pc2gsm_head) {
-        uint8_t n = rb_pc2gsm[rb_pc2gsm_tail];
-        if (n == '\n') rb_pc2gsm_tail = (rb_pc2gsm_tail + 1) % RB_SIZE;
-      }
-      cmd_state = 0;  cmd_pending_cnt = 0;  handled = 1;
-    }
-    /* 状态 20 (!S): 等 'L' */
-    else if (cmd_state == 20 && (ch == 'L' || ch == 'l')) {
-      cmd_pending[2] = ch;  cmd_pending_cnt = 3;  cmd_state = 21;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 21 (!SL): 等 'E' */
-    else if (cmd_state == 21 && (ch == 'E' || ch == 'e')) {
-      cmd_pending[3] = ch;  cmd_pending_cnt = 4;  cmd_state = 22;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 22 (!SLE): 等 'E' */
-    else if (cmd_state == 22 && (ch == 'E' || ch == 'e')) {
-      cmd_pending[4] = ch;  cmd_pending_cnt = 5;  cmd_state = 23;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 23 (!SLEE): 等 'P' */
-    else if (cmd_state == 23 && (ch == 'P' || ch == 'p')) {
-      cmd_pending[5] = ch;  cmd_pending_cnt = 6;  cmd_state = 24;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* 状态 24 (!SLEEP): 等 \r \n → 进入 Stop1 */
-    else if (cmd_state == 24 && (ch == '\r' || ch == '\n'))
-    {
-      if (ch == '\r' && rb_pc2gsm_tail != rb_pc2gsm_head) {
-        uint8_t n = rb_pc2gsm[rb_pc2gsm_tail];
-        if (n == '\n') rb_pc2gsm_tail = (rb_pc2gsm_tail + 1) % RB_SIZE;
-      }
-      cmd_state = 0;  cmd_pending_cnt = 0;  handled = 1;
-      /* Drain GSM buffer, then enter sleep */
-      while (rb_gsm2pc_tail != rb_gsm2pc_head) {
-        HAL_UART_Transmit(&huart2, &rb_gsm2pc[rb_gsm2pc_tail], 1, 10);
-        rb_gsm2pc_tail = (rb_gsm2pc_tail + 1) % RB_SIZE;
-      }
-      HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !SLEEP Sleeping...\r\n", 27, 100);
-      HAL_Delay(10);
-      Enter_Stop1_Mode();
-      g_sys_state = STATE_IDLE;
-    }
-    /* ---- 状态 30 (!V): 等 'B' ---- */
-    else if (cmd_state == 30 && (ch == 'B' || ch == 'b')) {
-      cmd_pending[2] = ch;  cmd_pending_cnt = 3;  cmd_state = 31;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* ---- 状态 31 (!VB): 等 'A' ---- */
-    else if (cmd_state == 31 && (ch == 'A' || ch == 'a')) {
-      cmd_pending[3] = ch;  cmd_pending_cnt = 4;  cmd_state = 32;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* ---- 状态 32 (!VBA): 等 'T' ---- */
-    else if (cmd_state == 32 && (ch == 'T' || ch == 't')) {
-      cmd_pending[4] = ch;  cmd_pending_cnt = 5;  cmd_state = 33;
-      cmd_last_tick = HAL_GetTick();  handled = 1;
-    }
-    /* ---- 状态 33 (!VBAT): 等 \r \n → 发送电池电压 ---- */
-    else if (cmd_state == 33 && (ch == '\r' || ch == '\n'))
-    {
-      if (ch == '\r' && rb_pc2gsm_tail != rb_pc2gsm_head) {
-        uint8_t n = rb_pc2gsm[rb_pc2gsm_tail];
-        if (n == '\n') rb_pc2gsm_tail = (rb_pc2gsm_tail + 1) % RB_SIZE;
-      }
-      cmd_state = 0;  cmd_pending_cnt = 0;  handled = 1;
-
-      float vbat = ADC_Get_Battery_Voltage();
-      uint8_t pct = ADC_Battery_Voltage_To_Percentage(vbat);
-      char buf[64];
-      int len;
-      if (vbat < 0.0f) {
-        len = snprintf(buf, sizeof(buf), "\r\n[VBAT] ADC read failed!\r\n");
-      } else {
-        /* 用整数避免 %f 依赖 _printf_float (未链接) */
-        int v_mv = (int)(vbat * 1000.0f + 0.5f);
-        len = snprintf(buf, sizeof(buf), "\r\n[VBAT] %d.%03dV  %d%%\r\n",
-                       v_mv / 1000, v_mv % 1000, (int)pct);
-      }
-      HAL_UART_Transmit(&huart2, (uint8_t *)buf, len, 100);
-    }
-
-    if (!handled) {
-      for (uint8_t i = 0; i < cmd_pending_cnt; i++) {
-        HAL_UART_Transmit(&huart1, &cmd_pending[i], 1, 10);
-      }
-      HAL_UART_Transmit(&huart1, &ch, 1, 10);
-      cmd_state = 0;  cmd_pending_cnt = 0;
-    }
+  else if (len == 4 && data[0] == '!' && data[1] == 'O' && data[2] == 'F' && data[3] == 'F') {
+    g_pending_cmd = CMD_OFF;
   }
-
-  /* 模组→电脑方向 */
-  while (rb_gsm2pc_tail != rb_gsm2pc_head) {
-    HAL_UART_Transmit(&huart2, &rb_gsm2pc[rb_gsm2pc_tail], 1, 10);
-    rb_gsm2pc_tail = (rb_gsm2pc_tail + 1) % RB_SIZE;
+  else if (len == 6 && data[0] == '!' && data[1] == 'S' && data[2] == 'L'
+                    && data[3] == 'E' && data[4] == 'E' && data[5] == 'P') {
+    g_pending_cmd = CMD_SLEEP;
+  }
+  else if (len == 5 && data[0] == '!' && data[1] == 'V' && data[2] == 'B'
+                    && data[3] == 'A' && data[4] == 'T') {
+    g_pending_cmd = CMD_VBAT;
+  }
+  else if (len == 5 && data[0] == '!' && data[1] == 'M' && data[2] == 'Q'
+                    && data[3] == 'T' && data[4] == 'T') {
+    g_pending_cmd = CMD_MQTT;
+  }
+  else if (len == 5 && data[0] == '!' && data[1] == 'T' && data[2] == 'E'
+                    && data[3] == 'S' && data[4] == 'T') {
+    g_pending_cmd = CMD_TEST;
+  }
+  else {
+    /* 非指令 → 透传给 4G 模组 (补回被剥离的 \r\n) */
+    HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 100);
   }
 }
 
@@ -268,6 +137,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_IWDG_Init();
@@ -278,27 +148,24 @@ int main(void)
 
   __HAL_DBGMCU_FREEZE_IWDG();
 
-  /* IMU + 双重复合门卫 */
+  /* IMU + 门卫 */
   if (LSM6DS_Init(&hi2c2) == 1) {
-    HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] IMU OK\r\n", 22, 100);
+    HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] IMU OK\r\n", 14, 100);
     if (LSM6DS_Config_Gatekeeper(GATEKEEPER_WU_MG, GATEKEEPER_6D_DEG) == 1) {
       HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] Gatekeeper OK\r\n", 20, 100);
-    } else {
-      HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] Gatekeeper FAIL\r\n", 22, 100);
     }
   } else {
-    HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] IMU FAIL!\r\n", 22, 100);
+    HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] IMU FAIL\r\n", 16, 100);
   }
 
-  /* 串口中断接收 */
-  HAL_UART_Receive_IT(&huart1, &gsm_rx_byte, 1);
-  HAL_UART_Receive_IT(&huart2, &pc_rx_byte,  1);
-
-  /* 4G 引脚初始态 */
   HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LTE_RESET_GPIO_Port,  LTE_RESET_Pin,  GPIO_PIN_RESET);
 
-  HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] Ready. Cmds: !ON !OFF !SLEEP\r\n", 40, 100);
+  /* 启动 DMA/IT 接收 (整行模式, 非逐字节) */
+  HAL_UARTEx_ReceiveToIdle_IT(&huart1, usart1_rx_buf, USART1_RX_BUF_SIZE);
+  HAL_UARTEx_ReceiveToIdle_IT(&huart2, usart2_rx_buf, USART2_RX_BUF_SIZE);
+
+  HAL_UART_Transmit(&huart2, (uint8_t*)"[SYS] Ready. !ON !OFF !SLEEP !VBAT\r\n", 40, 100);
 
   /* USER CODE END 2 */
 
@@ -310,29 +177,189 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* ORE 防锁死 */
     if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE)) {
       __HAL_UART_CLEAR_FLAG(&huart1, UART_CLEAR_OREF);
     }
 
     switch (g_sys_state)
     {
-
-    /* ======== 状态 0：空闲 (透传+指令) ======== */
     case STATE_IDLE:
-      Passthrough_Drain_With_Cmds();
+      /* 执行来自中断回调的待处理命令 (主循环上下文, 可安全调用阻塞函数) */
+      if (g_pending_cmd != CMD_NONE) {
+        PendingCmd_t cmd = g_pending_cmd;
+        g_pending_cmd = CMD_NONE;
+
+        switch (cmd) {
+        case CMD_ON:
+          HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !ON\r\n", 14, 100);
+          Turn_On_ML307C();
+          break;
+        case CMD_OFF:
+          HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !OFF\r\n", 15, 100);
+          Turn_Off_ML307C();
+          break;
+        case CMD_SLEEP:
+          HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[CMD] !SLEEP\r\n", 16, 100);
+          HAL_Delay(10);
+          Enter_Stop1_Mode();
+          g_sys_state = STATE_IDLE;
+          break;
+        case CMD_VBAT: {
+          float vbat = ADC_Get_Battery_Voltage();
+          uint8_t pct = ADC_Battery_Voltage_To_Percentage(vbat);
+          char buf[64]; int n;
+          if (vbat < 0.0f) {
+            n = snprintf(buf, sizeof(buf), "\r\n[VBAT] ADC read failed!\r\n");
+          } else {
+            int v_mv = (int)(vbat * 1000.0f + 0.5f);
+            n = snprintf(buf, sizeof(buf), "\r\n[VBAT] %d.%03dV  %d%%\r\n",
+                         v_mv / 1000, v_mv % 1000, (int)pct);
+          }
+          HAL_UART_Transmit(&huart2, (uint8_t *)buf, n, 100);
+          break;
+        }
+        case CMD_MQTT: {
+          HAL_UART_AbortReceive(&huart1);
+          HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[MQTT] Connecting...\r\n", 23, 100);
+
+          /* 1. 开机 + 轮询 AT (不再盲等 5s) */
+          Turn_On_ML307C();
+          {
+            uint32_t to = HAL_GetTick();
+            int ok = 0;
+            while (HAL_GetTick() - to < 8000) {
+              HAL_IWDG_Refresh(&hiwdg);
+              if (ML307C_Send_CMD("AT", "OK", 200) == 1) { ok = 1; break; }
+              HAL_Delay(200);
+            }
+            if (!ok) { HAL_UART_Transmit(&huart2, (uint8_t*)"[MQTT] PWR timeout\r\n", 20, 100); goto mqtt_end; }
+          }
+
+          /* 2. 基础握手仅一次, 然后只轮询 CGATT */
+          {
+            ML307C_Network_Status_t ns = {0};
+            ML307C_Network_Init(&ns);  /* AT/ATE0/CPIN 一次过 */
+            uint32_t to = HAL_GetTick();
+            int ok = 0;
+            while (HAL_GetTick() - to < 15000) {
+              HAL_IWDG_Refresh(&hiwdg);
+              if (ML307C_Send_CMD("AT+CGATT?", "+CGATT: 1", 500) == 1) { ok = 1; break; }
+              HAL_Delay(500);
+            }
+            if (!ok) { HAL_UART_Transmit(&huart2, (uint8_t*)"[MQTT] NET timeout\r\n", 20, 100); goto mqtt_end; }
+          }
+
+          /* 3. MQTT 握手 */
+          if (ML307C_MQTT_Connect("101.34.217.153", 1883, "solar_imu", "solar_imu") != 1) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)"[MQTT] Connect FAIL\r\n", 21, 100);
+            goto mqtt_end;
+          }
+          HAL_IWDG_Refresh(&hiwdg);
+
+          /* 4. 秒发数据 */
+          {
+            float v = ADC_Get_Battery_Voltage();
+            float tilt = LSM6DS_Get_Tilt_Angle();
+            int v100 = (int)(v * 100.0f + 0.5f);
+            int t100 = (int)(tilt * 100.0f + 0.5f);
+            ML307C_Send_CustomData((int16_t)v100, (int16_t)t100, "solar_imu/test");
+            HAL_UART_Transmit(&huart2, (uint8_t*)"[MQTT] Data sent!\r\n", 18, 100);
+          }
+
+        mqtt_end:
+          Turn_Off_ML307C();
+          HAL_UARTEx_ReceiveToIdle_IT(&huart1, usart1_rx_buf, USART1_RX_BUF_SIZE);
+          HAL_UART_Transmit(&huart2, (uint8_t*)"[MQTT] Done.\r\n", 14, 100);
+          break;
+        }
+        case CMD_TEST: {
+          uint32_t t_start, t_pwr = 0, t_net = 0, t_conn = 0, t_pub = 0;
+          ML307C_Network_Status_t ns = {0};
+          char log[200]; int n;
+
+          HAL_UART_AbortReceive(&huart1);
+          HAL_UART_Transmit(&huart2, (uint8_t*)"\r\n[TEST] Timer start...\r\n", 24, 100);
+
+          t_start = HAL_GetTick();
+
+          /* 1. 开机 */
+          Turn_On_ML307C();
+          {
+            uint32_t to = HAL_GetTick();
+            while (HAL_GetTick() - to < 8000) {
+              HAL_IWDG_Refresh(&hiwdg);
+              if (ML307C_Send_CMD("AT", "OK", 200) == 1) { t_pwr = HAL_GetTick(); break; }
+              HAL_Delay(200);
+            }
+          }
+          if (!t_pwr) { HAL_UART_Transmit(&huart2, (uint8_t*)"[TEST] PWR timeout!\r\n", 21, 100); goto test_end; }
+
+          /* 2. 网络附着: 基础握手仅一次, 然后只轮询 CGATT */
+          ML307C_Network_Init(&ns);
+          {
+            uint32_t to = HAL_GetTick();
+            while (HAL_GetTick() - to < 15000) {
+              HAL_IWDG_Refresh(&hiwdg);
+              if (ML307C_Send_CMD("AT+CGATT?", "+CGATT: 1", 500) == 1) { t_net = HAL_GetTick(); break; }
+              HAL_Delay(500);
+            }
+          }
+          if (!t_net) { HAL_UART_Transmit(&huart2, (uint8_t*)"[TEST] NET timeout!\r\n", 21, 100); goto test_end; }
+
+          /* 3. MQTT 握手 */
+          if (ML307C_MQTT_Connect("101.34.217.153", 1883, "solar_imu", "solar_imu") == 1) {
+            t_conn = HAL_GetTick();
+          } else {
+            HAL_UART_Transmit(&huart2, (uint8_t*)"[TEST] MQTT fail!\r\n", 19, 100);
+            goto test_end;
+          }
+
+          /* 4. 发布数据 (直发, 无盲等) */
+          {
+            float v = ADC_Get_Battery_Voltage();
+            float tilt = LSM6DS_Get_Tilt_Angle();
+            int v100 = (int)(v * 100.0f + 0.5f);
+            int t100 = (int)(tilt * 100.0f + 0.5f);
+            if (ML307C_Send_CustomData((int16_t)v100, (int16_t)t100, "solar_imu/test") == 1) {
+              t_pub = HAL_GetTick();
+            } else {
+              HAL_UART_Transmit(&huart2, (uint8_t*)"[TEST] Pub fail!\r\n", 18, 100);
+              goto test_end;
+            }
+          }
+
+          /* 报表 */
+          n = snprintf(log, sizeof(log),
+                       "\r\n==== PROFILER REPORT ====\r\n"
+                       "1.Power-On  : %4d ms\r\n"
+                       "2.Network   : %4d ms\r\n"
+                       "3.MQTT Conn : %4d ms\r\n"
+                       "4.Publish   : %4d ms\r\n"
+                       "------------------------\r\n"
+                       "TOTAL       : %4d ms\r\n"
+                       "========================\r\n",
+                       (int)(t_pwr - t_start), (int)(t_net - t_pwr),
+                       (int)(t_conn - t_net), (int)(t_pub - t_conn),
+                       (int)(t_pub - t_start));
+          HAL_UART_Transmit(&huart2, (uint8_t *)log, n, 200);
+
+        test_end:
+          Turn_Off_ML307C();
+          HAL_UARTEx_ReceiveToIdle_IT(&huart1, usart1_rx_buf, USART1_RX_BUF_SIZE);
+          break;
+        }
+        default: break;
+        }
+      }
       HAL_IWDG_Refresh(&hiwdg);
       break;
 
-    /* ======== 状态 1：深度休眠 ======== */
     case STATE_SLEEP:
-      Passthrough_Drain_With_Cmds();
       HAL_IWDG_Refresh(&hiwdg);
       Enter_Stop1_Mode();
       g_sys_state = STATE_IDLE;
       break;
-
-    } /* switch */
+    }
   }
   /* USER CODE END 3 */
 }
@@ -387,20 +414,39 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /**
-  * @brief  Stop1 深度休眠 (IMU 双门卫唤醒 + GPIO 漏电切断 + 锁存清理)
+  * @brief  UART 接收完成回调 (DMA/IT 整行接收)
+  */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+  if (huart->Instance == USART1) {
+    /* 4G 模组 → PC: 直接转发 */
+    if (Size > 0) {
+      HAL_UART_Transmit(&huart2, usart1_rx_buf, Size, 100);
+    }
+    HAL_UARTEx_ReceiveToIdle_IT(&huart1, usart1_rx_buf, USART1_RX_BUF_SIZE);
+  }
+  else if (huart->Instance == USART2) {
+    /* PC 指令: 解析执行或透传 */
+    if (Size > 0) {
+      Process_PC_Command(usart2_rx_buf, Size);
+    }
+    HAL_UARTEx_ReceiveToIdle_IT(&huart2, usart2_rx_buf, USART2_RX_BUF_SIZE);
+  }
+}
+
+/**
+  * @brief  Stop1 深度休眠
   */
 static void Enter_Stop1_Mode(void)
 {
-  /* 睡前：USART1 TX/RX 切模拟输入 (防漏电) */
   GPIO_InitTypeDef g = {0};
   g.Pin  = GPIO_PIN_6 | GPIO_PIN_7;
   g.Mode = GPIO_MODE_ANALOG;
   g.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &g);
 
-  /* ★关键★ 先读清 IMU 全部锁存 → INT1 回 LOW → 再清 EXTI → 才能捕获下次上升沿 */
   { uint8_t _wu, _6d; LSM6DS_Clear_All_Interrupts_Ex(&_wu, &_6d); }
-  HAL_Delay(1);  /* 等 INT1 引脚物理放电 */
+  HAL_Delay(1);
   __HAL_GPIO_EXTI_CLEAR_IT(IMU_INT1_WAKEUP_Pin);
   HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
 
@@ -408,22 +454,20 @@ static void Enter_Stop1_Mode(void)
   HAL_SuspendTick();
   HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
 
-  /* ========== 醒来 ========== */
+  /* ===== 醒来 ===== */
   HAL_IWDG_Refresh(&hiwdg);
   HAL_ResumeTick();
   SystemClock_Config();
 
-  /* ★关键★ DeInit 强制重置 HAL 状态 → Init 才会真正恢复硬件 */
   HAL_UART_DeInit(&huart1);
   HAL_UART_DeInit(&huart2);
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   HAL_Delay(2);
 
-  HAL_UART_Receive_IT(&huart1, &gsm_rx_byte, 1);
-  HAL_UART_Receive_IT(&huart2, &pc_rx_byte,  1);
+  HAL_UARTEx_ReceiveToIdle_IT(&huart1, usart1_rx_buf, USART1_RX_BUF_SIZE);
+  HAL_UARTEx_ReceiveToIdle_IT(&huart2, usart2_rx_buf, USART2_RX_BUF_SIZE);
 
-  /* I2C 唤醒后重初始化 (HAL gState 防跳) */
   HAL_I2C_DeInit(&hi2c2);
   MX_I2C2_Init();
 
@@ -440,26 +484,6 @@ static void Enter_Stop1_Mode(void)
     HAL_UART_Transmit(&huart2, (uint8_t*)"6D tilt\r\n", 10, 100);
   } else {
     HAL_UART_Transmit(&huart2, (uint8_t*)"Unknown\r\n", 10, 100);
-  }
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART1) {
-    uint8_t next = (rb_gsm2pc_head + 1) % RB_SIZE;
-    if (next != rb_gsm2pc_tail) {
-      rb_gsm2pc[rb_gsm2pc_head] = gsm_rx_byte;
-      rb_gsm2pc_head = next;
-    }
-    HAL_UART_Receive_IT(&huart1, &gsm_rx_byte, 1);
-  }
-  else if (huart->Instance == USART2) {
-    uint8_t next = (rb_pc2gsm_head + 1) % RB_SIZE;
-    if (next != rb_pc2gsm_tail) {
-      rb_pc2gsm[rb_pc2gsm_head] = pc_rx_byte;
-      rb_pc2gsm_head = next;
-    }
-    HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   }
 }
 
