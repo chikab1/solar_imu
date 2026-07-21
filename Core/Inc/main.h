@@ -37,6 +37,24 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
+typedef struct {
+    uint32_t magic;     /* 0x55AA55AA - 魔法数字, 判断备份域是否已初始化 */
+    uint16_t wu_mg;     /* 加速度计唤醒门限 (mg), 默认 300 */
+    uint16_t tilt_deg;  /* 6D 倾角触发门限 (度), 默认 30 */
+    uint32_t sleep_sec; /* RTC 周期唤醒间隔 (秒), 默认 3600 */
+    uint16_t v_low_mv;  /* 低压熔断阈值 (mV), 默认 3300 */
+    uint8_t  mount_axis; /* Fixed zero reference: Z+, Z-, X+, X-, Y+, Y- */
+} SysConfig_t;
+
+typedef enum {
+    MOUNT_AXIS_Z_POS = 0,
+    MOUNT_AXIS_Z_NEG = 1,
+    MOUNT_AXIS_X_POS = 2,
+    MOUNT_AXIS_X_NEG = 3,
+    MOUNT_AXIS_Y_POS = 4,
+    MOUNT_AXIS_Y_NEG = 5
+} MountAxis_t;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

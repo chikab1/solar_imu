@@ -12,7 +12,7 @@
  *    每周期：陀螺旋转 → 加计 2% 拉回 → 重归一化 → 输出   *
  * ======================================================= */
 
-/* ---- 重力估计单位向量：初始指向地心 = (0, 0, 1)，即理想直立姿态 ---- */
+/* ---- 重力估计单位向量：初始指向地心 = (0, 0, 1)，即理想竖直姿态 ---- */
 static float s_est_nx = 0.0f;
 static float s_est_ny = 0.0f;
 static float s_est_nz = 1.0f;
@@ -33,7 +33,8 @@ void LSM6DS_Complementary_Tilt_Update(float ax, float ay, float az,
 {
     /* ----------------------------------------------------------------
      *  第 1 步：加速度计即时重力倾角（零延迟，含高频噪声）
-     *  cos(θ) = (当前重力 · 地心) / |g| = az / |g|
+     *  sin(θ) = az / |g|, θ = asin(az_norm)
+     *  竖直 (az≈0) → θ≈0°, 平放 (az≈1g) → θ≈90°
      *  地心方向 = (0, 0, 1)，天然绝对基准，永不偏移
      * ---------------------------------------------------------------- */
     float len_acc = sqrtf(ax * ax + ay * ay + az * az);
@@ -42,7 +43,7 @@ void LSM6DS_Complementary_Tilt_Update(float ax, float ay, float az,
     float az_norm = az / len_acc;
     if (az_norm > 1.0f)  az_norm = 1.0f;
     if (az_norm < -1.0f) az_norm = -1.0f;
-    *out_raw_tilt = acosf(az_norm) * 57.29578f;
+    *out_raw_tilt = asinf(az_norm) * 57.29578f;
 
     /* ----------------------------------------------------------------
      *  第 2 步：陀螺仪外积旋转 —— 驱动估计向量在空间旋转
@@ -90,19 +91,20 @@ void LSM6DS_Complementary_Tilt_Update(float ax, float ay, float az,
 
     /* ----------------------------------------------------------------
      *  第 5 步：融合倾角输出
-     *  点积: cos(θ) = R_est · (0, 0, 1) = s_est_nz
-     *  地心方向就是绝对真相，不需要任何基准向量
+     *  点积: sin(θ) = R_est · (0, 0, 1) = s_est_nz
+     *  θ = asin(s_est_nz), 竖直=0°, 平放=90°
      * ---------------------------------------------------------------- */
     float cos_fused = s_est_nz;
     if (cos_fused > 1.0f)  cos_fused = 1.0f;
     if (cos_fused < -1.0f) cos_fused = -1.0f;
-    *out_fused_tilt = acosf(cos_fused) * 57.29578f;
+    *out_fused_tilt = asinf(cos_fused) * 57.29578f;
 }
 
 /* ========================================================================== */
 
 /* 静态全局驱动实例 */
 static stmdev_ctx_t imu_ctx;
+static uint8_t s_sleep_mode_ready = 0U;
 static const uint8_t imu_addr = (0x6A << 1);  /* 7位地址 0x6A → 8位 0xD4 */
 
 /* I2C 平台桥接函数 —— 连接 lsm6ds3tr-c 驱动与 HAL 硬件 I2C */
@@ -134,6 +136,8 @@ static int32_t lsm6ds3tr_c_hal_read(void *handle, uint8_t reg,
 uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
 {
     uint8_t chip_id = 0;
+
+    s_sleep_mode_ready = 0U;
 
     imu_ctx.write_reg = lsm6ds3tr_c_hal_write;
     imu_ctx.read_reg  = lsm6ds3tr_c_hal_read;
@@ -192,6 +196,65 @@ uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps)
     gyro_dps[1] = (float)raw_gyr[1] * 0.07f;
     gyro_dps[2] = (float)raw_gyr[2] * 0.07f;
 
+    return 1;
+}
+
+uint8_t LSM6DS_Set_Active_Mode(void)
+{
+    lsm6ds3tr_c_int1_route_t int1_route = {0};
+
+    /* Do not latch another event during capture or modem activity. */
+    if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
+    int1_route.int1_wu = 0;
+    int1_route.int1_6d = 0;
+    int1_route.int1_tilt = 0;
+    if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
+
+    if (lsm6ds3tr_c_xl_power_mode_set(&imu_ctx,
+                                      LSM6DS3TR_C_XL_HIGH_PERFORMANCE) != 0 ||
+        lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_XL_ODR_104Hz) != 0 ||
+        lsm6ds3tr_c_gy_power_mode_set(&imu_ctx,
+                                      LSM6DS3TR_C_GY_HIGH_PERFORMANCE) != 0 ||
+        lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_GY_ODR_104Hz) != 0) {
+        return 0;
+    }
+    s_sleep_mode_ready = 0U;
+    return 1;
+}
+
+uint8_t LSM6DS_Set_Sleep_Mode(void)
+{
+    lsm6ds3tr_c_int1_route_t int1_route = {0};
+
+    /* Do not clear an event that arrived while already armed for Stop1. */
+    if (s_sleep_mode_ready) return 1U;
+
+    /* Keep the proven 52 Hz accelerometer operating point for WU/6D.  The
+     * gyroscope is independent of both embedded functions and can be stopped
+     * until active capture starts. */
+    if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
+    int1_route.int1_wu = 0;
+    int1_route.int1_6d = 0;
+    int1_route.int1_tilt = 0;
+    if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
+
+    if (lsm6ds3tr_c_xl_power_mode_set(&imu_ctx,
+                                      LSM6DS3TR_C_XL_HIGH_PERFORMANCE) != 0 ||
+        lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_XL_ODR_52Hz) != 0 ||
+        lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_GY_ODR_OFF) != 0) {
+        return 0;
+    }
+    HAL_Delay(50U);
+    { uint8_t wu, d6d; LSM6DS_Clear_All_Interrupts_Ex(&wu, &d6d); }
+    int1_route.int1_wu = 1;
+    int1_route.int1_6d = 1;
+    int1_route.int1_tilt = 0;
+    if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
+    s_sleep_mode_ready = 1U;
     return 1;
 }
 
@@ -261,7 +324,7 @@ uint8_t LSM6DS_Clear_Wakeup(void)
 
 /**
   * @brief  一键读取重力倾角（纯加速度计，最简调用）
-  * @retval 重力方向总倾角 (°)，范围 0~180。读失败返回 -1.0f
+  * @retval 重力倾角 (°)，+Z竖直=0°, 平放=90°, 倒置=180°。读失败返回 -1.0f
   */
 float LSM6DS_Get_Tilt_Angle(void)
 {
@@ -317,8 +380,9 @@ uint8_t LSM6DS_Config_6D_Wakeup(void)
         return 0;
     }
 
-    /* 3. 6D 检测阈值：DEG_80 (值=0) 最灵敏 ~10°倾角触发 */
-    if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, LSM6DS3TR_C_DEG_80) != 0) {
+    /* 3. 6D is a face-orientation detector, not an arbitrary tilt alarm.
+     * Use the 60-degree face-recognition threshold recommended by ST. */
+    if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, LSM6DS3TR_C_DEG_60) != 0) {
         return 0;
     }
 
@@ -374,7 +438,11 @@ uint8_t LSM6DS_Clear_6D_Wakeup(void)
 uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
 {
     lsm6ds3tr_c_int1_route_t int1_route = {0};
-    lsm6ds3tr_c_tap_cfg_t     tap_cfg;
+    lsm6ds3tr_c_tap_cfg_t tap_cfg;
+    lsm6ds3tr_c_sixd_ths_t deg_val;
+
+    /* Any threshold change requires one clean settle/rearm cycle. */
+    s_sleep_mode_ready = 0U;
 
     /* ---- WAKE-UP mg → 寄存器值映射 ---- *
      *  ±2g 满量程: 每步 = 2000mg / 64 = 31.25mg          *
@@ -382,13 +450,13 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     uint8_t wu_reg = (uint8_t)(((uint32_t)wu_mg * 10 + 156) / 312);
     if (wu_reg > 63) wu_reg = 63;
 
-    /* ---- 6D 角度 → 硬件档位映射 ---- *
-     *  硬件仅 4 档 (~10°/20°/30°/40°), 就近匹配          */
-    lsm6ds3tr_c_sixd_ths_t deg_val;
-    if      (deg_6d <= 15) deg_val = LSM6DS3TR_C_DEG_80;   /* ~10° */
-    else if (deg_6d <= 25) deg_val = LSM6DS3TR_C_DEG_70;   /* ~20° */
-    else if (deg_6d <= 35) deg_val = LSM6DS3TR_C_DEG_60;   /* ~30° */
-    else                   deg_val = LSM6DS3TR_C_DEG_50;   /* ~40° */
+    /* Preserve the original four-step 6D angle mapping that was previously
+     * proven on this board. DEG_60 is the normal setting for a 30-degree
+     * installation alarm, followed by an exact MCU angle confirmation. */
+    if      (deg_6d <= 15U) deg_val = LSM6DS3TR_C_DEG_80;
+    else if (deg_6d <= 25U) deg_val = LSM6DS3TR_C_DEG_70;
+    else if (deg_6d <= 35U) deg_val = LSM6DS3TR_C_DEG_60;
+    else                    deg_val = LSM6DS3TR_C_DEG_50;
 
     /* 1. INT1: 推挽、高有效、锁存 */
     if (lsm6ds3tr_c_pin_mode_set(&imu_ctx, LSM6DS3TR_C_PUSH_PULL) != 0 ||
@@ -404,19 +472,21 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                               (uint8_t *)&tap_cfg, 1) != 0) return 0;
 
-    /* 3. WAKE-UP */
+    /* 3. WAKE-UP: keep the proven GitHub register configuration. */
     if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
         lsm6ds3tr_c_wkup_dur_set(&imu_ctx, 0) != 0) return 0;
 
-    /* 4. 6D: 4D关闭, 低通使能 */
+    /* 4. 6D orientation detection; relative Tilt remains disabled. */
     if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, deg_val) != 0 ||
         lsm6ds3tr_c_4d_mode_set(&imu_ctx, 0) != 0 ||
-        lsm6ds3tr_c_6d_feed_data_set(&imu_ctx, LSM6DS3TR_C_LPF2_FEED) != 0) return 0;
+        lsm6ds3tr_c_6d_feed_data_set(&imu_ctx,
+                                     LSM6DS3TR_C_LPF2_FEED) != 0) return 0;
 
     /* 5. 双通道路由 INT1 */
     if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
     int1_route.int1_wu = 1;
     int1_route.int1_6d = 1;
+    int1_route.int1_tilt = 0;
     if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
 
     /* 6. 清残留 */
@@ -426,26 +496,42 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
 }
 
 /**
-  * @brief  读清 WAKE-UP + 6D 中断源锁存，返回各通道触发情况
-  * @note   直接读两个关键寄存器，避免 all_sources_get 长链中的 I2C 失败
-  * @param  out_wu:  输出 WAKE-UP 触发标志 (1=触发)
-  * @param  out_6d:  输出 6D 触发标志 (1=触发)
+  * @brief Read and clear every source that can keep the latched INT1 high.
+  * @note  WAKE_UP_SRC clears WU and D6D_SRC clears 6D. TAP/FUNC sources are
+  *        also drained so a stale auxiliary latch cannot hold INT1 asserted.
   */
 void LSM6DS_Clear_All_Interrupts_Ex(uint8_t *out_wu, uint8_t *out_6d)
 {
-    lsm6ds3tr_c_wake_up_src_t wu_src;
-    lsm6ds3tr_c_d6d_src_t     d6d_src;
+    lsm6ds3tr_c_wake_up_src_t wu_src = {0};
+    lsm6ds3tr_c_d6d_src_t d6d_src = {0};
 
-    *out_wu = 0;
-    *out_6d = 0;
+    if (out_wu != NULL) *out_wu = 0U;
+    if (out_6d != NULL) *out_6d = 0U;
 
     if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_WAKE_UP_SRC,
                              (uint8_t *)&wu_src, 1) == 0) {
-        if (wu_src.wu_ia != 0U) *out_wu = 1;
+        if (out_wu != NULL && wu_src.wu_ia != 0U) *out_wu = 1U;
     }
 
     if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_D6D_SRC,
                              (uint8_t *)&d6d_src, 1) == 0) {
-        if (d6d_src.d6d_ia != 0U) *out_6d = 1;
+        if (out_6d != NULL && d6d_src.d6d_ia != 0U) *out_6d = 1U;
     }
+}
+
+uint8_t LSM6DS_Get_Gatekeeper_Diag(uint8_t out_regs[8])
+{
+    static const uint8_t addresses[8] = {
+        LSM6DS3TR_C_CTRL1_XL, LSM6DS3TR_C_CTRL8_XL,
+        LSM6DS3TR_C_CTRL10_C, LSM6DS3TR_C_TAP_CFG,
+        LSM6DS3TR_C_TAP_THS_6D, LSM6DS3TR_C_WAKE_UP_THS,
+        LSM6DS3TR_C_WAKE_UP_DUR, LSM6DS3TR_C_MD1_CFG
+    };
+
+    if (out_regs == NULL) return 0U;
+    for (uint8_t i = 0U; i < 8U; i++) {
+        if (lsm6ds3tr_c_read_reg(&imu_ctx, addresses[i], &out_regs[i], 1) != 0)
+            return 0U;
+    }
+    return 1U;
 }

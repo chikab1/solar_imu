@@ -1,3 +1,7 @@
-build
+build/
 mx.scratch
 !.settings
+tmp/
+__pycache__/
+*.py[cod]
+*.log

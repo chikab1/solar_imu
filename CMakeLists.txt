@@ -78,7 +78,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/Src/at_ml307c.c
     ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds.c
     ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds3tr-c_reg.c
-
+    ${CMAKE_SOURCE_DIR}/Core/Src/uart_driver.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/event_store.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/service_protocol.c
 )
 
 # 浮点数 printf 已移除 (MQTT/GPS函数已注释，无浮点格式化需求)

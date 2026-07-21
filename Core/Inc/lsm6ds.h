@@ -13,6 +13,8 @@ extern "C" {
 /* Exported functions prototypes ---------------------------------------------*/
 uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c);
 uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps);
+uint8_t LSM6DS_Set_Active_Mode(void);
+uint8_t LSM6DS_Set_Sleep_Mode(void);
 uint8_t LSM6DS_Config_Wakeup(uint8_t threshold, uint8_t duration);
 uint8_t LSM6DS_Clear_Wakeup(void);
 
@@ -96,6 +98,7 @@ uint8_t LSM6DS_Clear_6D_Wakeup(void);
   * @retval 1-成功, 0-失败
   */
 uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d);
+uint8_t LSM6DS_Get_Gatekeeper_Diag(uint8_t out_regs[8]);
 
 /**
   * @brief  读清 IMU 全部中断源锁存 (WAKE_UP + D6D + TAP 等全部源寄存器)

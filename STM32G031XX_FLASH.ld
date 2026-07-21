@@ -62,7 +62,8 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 8K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 64K
+/* Last 4K (pages 30-31) are reserved for the power-loss-safe event journal. */
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 60K
 }
 
 /* Define output sections */
