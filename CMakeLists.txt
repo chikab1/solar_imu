@@ -81,6 +81,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/Src/uart_driver.c
     ${CMAKE_SOURCE_DIR}/Core/Src/event_store.c
     ${CMAKE_SOURCE_DIR}/Core/Src/service_protocol.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/sys_config.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/power_manager.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/rtc_utils.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/service_handler.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/event_report.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/low_power.c
 )
 
 # 浮点数 printf 已移除 (MQTT/GPS函数已注释，无浮点格式化需求)

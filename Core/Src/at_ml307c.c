@@ -4,7 +4,7 @@
   * @file    at_ml307c.c
   * @brief   中移 OneMO ML307C 4G/GPS 模组 AT 指令驱动 (生产级优化版)
   * @note    针对 STM32G031 (64KB Flash / 8KB RAM) 深度优化:
-  *          1. 静态复用发送缓冲区 s_at_tx_buf[256], 避免栈大数组
+  *          1. 静态复用发送缓冲区 s_at_tx_buf[512], 避免栈大数组
   *          2. GPS 解析采用纯整数手动解析, 杜绝 sscanf(%f) 拖入浮点库
   *          3. ML307C_Receive_Data 采用空闲断帧接收, 防止单字节退出误匹配
   *          4. ML307C_Send_CMD 内嵌 IWDG 喂狗, 确保长耗时 AT 指令不触发看门狗复位
@@ -23,21 +23,28 @@
 
 /* ========================== 私有静态变量 ========================== */
 
-static uint8_t  s_uart_rx_buf[ML307C_MAX_BUF_SIZE];
-static uint16_t s_rx_buf_len = 0;
+static uint8_t  s_uart_rx_buf[ML307C_MAX_BUF_SIZE]; /**< 当前AT响应/URC聚合缓冲。 */
+static uint16_t s_rx_buf_len = 0;                   /**< 聚合缓冲中已接收字节数。 */
 
-static char     s_at_tx_buf[512];
+static char     s_at_tx_buf[512];                   /**< 所有AT命令和MQTT JSON命令复用发送区。 */
 
-static char     s_imei[32] = {0};
+static char     s_imei[32] = {0};                   /**< 已读取的模组IMEI，掉电前持续有效。 */
 
 void ML307C_Drain_Rx(uint32_t drain_ms);
 
-/* The application overrides this weak hook to keep the service UART alive
- * while an AT command is waiting for the modem. */
+/**
+ * @brief AT阻塞等待期间供应用层运行短后台任务的弱回调。
+ * @note main.c覆盖该函数以继续处理维护串口；驱动独立使用时允许保持空实现。
+ */
 __weak void ML307C_Background_Poll(void)
 {
 }
 
+/**
+ * @brief 可维护USART2并喂IWDG的毫秒延时。
+ * @param delay_ms 延时时长。
+ * @note 用于PWRKEY/RESET脉冲等必须等待但不能让维护口失联的流程。
+ */
 static void ML307C_DelayWithPoll(uint32_t delay_ms)
 {
     uint32_t start = HAL_GetTick();
@@ -102,6 +109,7 @@ const char* ML307C_Get_IMEI_Str(void)
     return (s_imei[0] != '\0') ? s_imei : "000000000000000";
 }
 
+/** @brief 判断IMEI缓存是否已经成功填充。 */
 uint8_t ML307C_Has_IMEI(void)
 {
     return (s_imei[0] != '\0') ? 1U : 0U;
@@ -236,27 +244,11 @@ int ML307C_Network_Init(ML307C_Network_Status_t *status)
 }
 
 
-/* ================================================================ *
- *  ML307C_MQTT_Connect                                            *
- * ================================================================ */
-
 /**
-  * @brief  连接 MQTT 服务器, 阻塞等待 broker 握手成功 URC
-  *
-  * @param  broker_url: MQTT 服务器 IP 或域名 (如 "101.34.217.153" 或 "broker.emqx.io")
-  * @param  port:       服务器端口 (如 1883 非加密 / 8883 加密)
-  * @param  username:   MQTT 登录用户名
-  * @param  password:   MQTT 登录密码
-  *
-  * @retval  1: 连接成功 (收到 +MQTTURC: "conn",0,0)
-  *          0: 连接失败或握手超时
-  *
-  * @note    内部两步:
-  *          ① AT+MQTTCFG 配置 clean_session=1 (每次全新会话) + keepalive=120s
-  *          ② AT+MQTTCONN 发起连接, 死等 +MQTTURC: "conn",0,0 (不盲等 OK!)
-  *          超时 12 秒, 适配公网服务器 TCP+TLS 握手最坏情况.
-  *          MQTT 客户端 ID 动态使用 IMEI (如 "dev_867926053214567"), 防止多设备互踢.
-  */
+ * @brief 从`+CEREG:`响应解析网络注册状态码。
+ * @param response 完整AT响应字符串。
+ * @return 状态码；无CEREG字段时返回-1。1为本地注册，5为漫游注册。
+ */
 static int ML307C_Parse_CEREG_Status(const char *response)
 {
     const char *p = strstr(response, "+CEREG:");
@@ -272,6 +264,13 @@ static int ML307C_Parse_CEREG_Status(const char *response)
     return (second >= 0) ? second : first;
 }
 
+/**
+ * @brief 在给定总预算内等待EPS注册并确认分组域附着。
+ * @param timeout_ms CEREG轮询总时间，单位ms。
+ * @param status 可选输出信号和附着状态。
+ * @return 1已注册且CGATT=1，0 SIM/AT/注册/附着失败。
+ * @note CSQ=99只代表当前未知，不会撤销已经确认的网络附着。
+ */
 int ML307C_Wait_Network(uint32_t timeout_ms, ML307C_Network_Status_t *status)
 {
     uint32_t start = HAL_GetTick();
@@ -313,6 +312,19 @@ int ML307C_Wait_Network(uint32_t timeout_ms, ML307C_Network_Status_t *status)
     return 1;
 }
 
+/* ================================================================ *
+ *  ML307C_MQTT_Connect                                            *
+ * ================================================================ */
+
+/**
+ * @brief 配置clean session/keepalive并连接MQTT Broker。
+ * @param broker_url Broker IP或域名。
+ * @param port Broker端口。
+ * @param username 登录用户名。
+ * @param password 登录密码。
+ * @return 1收到`+MQTTURC: "conn",0,0`，0失败或12秒超时。
+ * @note Client ID自动拼为`dev_<IMEI>`，调用前需完成IMEI和网络初始化。
+ */
 int ML307C_MQTT_Connect(char *broker_url, int port, char *username, char *password)
 {
     /* ① 配置 MQTT 参数: 干净会话 + 120 秒保活 */
@@ -366,6 +378,7 @@ int ML307C_MQTT_PublishEx(char *topic, char *payload, uint8_t dup)
     return ML307C_Send_CMD(s_at_tx_buf, "+MQTTURC: \"puback\"", 10000);
 }
 
+/** @brief 以首次发送标志dup=0调用ML307C_MQTT_PublishEx()。 */
 int ML307C_MQTT_Publish(char *topic, char *payload)
 {
     return ML307C_MQTT_PublishEx(topic, payload, 0U);
@@ -442,6 +455,10 @@ void ML307C_Clear_Buffer(void)
     UART_FlushRx(&g_uart1_drv);
 }
 
+/**
+ * @brief 丢弃延迟到达的旧AT响应，避免被下一条命令误匹配。
+ * @param drain_ms 最大清理预算；连续100 ms无数据会提前返回。
+ */
 void ML307C_Drain_Rx(uint32_t drain_ms)
 {
     uint32_t start = HAL_GetTick();
@@ -509,6 +526,10 @@ const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms)
   * @note   PB4 高电平 → NPN 三极管导通 → PWRKEY 拉低 → 模组上电启动
   *         使用 2.3 秒脉冲，满足 ML307C 2~3.5 秒的开机要求。
   */
+/**
+ * @brief 开始非阻塞开机：重启USART1接收、清缓存并拉低PWRKEY。
+ * @note 调用方应维持2~3.5秒低脉冲，再调用ML307C_End_PowerOn_Pulse()。
+ */
 void ML307C_Begin_PowerOn(void)
 {
     (void)UART1_RestartReceive();
@@ -516,11 +537,13 @@ void ML307C_Begin_PowerOn(void)
     HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_SET);
 }
 
+/** @brief 释放PWRKEY，结束ML307C开机低脉冲。 */
 void ML307C_End_PowerOn_Pulse(void)
 {
     HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_RESET);
 }
 
+/** @brief 非阻塞吸收USART1数据并检查是否已经出现`+MATREADY`。 */
 uint8_t ML307C_Poll_MATREADY(void)
 {
     uint16_t avail = UART_Available(&g_uart1_drv);
@@ -537,11 +560,16 @@ uint8_t ML307C_Poll_MATREADY(void)
     return (strstr((char *)s_uart_rx_buf, "+MATREADY") != NULL) ? 1U : 0U;
 }
 
+/** @brief 读取模组STATE硬件引脚；高电平返回1。 */
 uint8_t ML307C_Is_Powered(void)
 {
     return (HAL_GPIO_ReadPin(LTE_STATE_GPIO_Port, LTE_STATE_Pin) == GPIO_PIN_SET) ? 1U : 0U;
 }
 
+/**
+ * @brief 阻塞式ML307C开机便捷封装。
+ * @note 维持2.3秒PWRKEY脉冲；后续仍应等待MATREADY或用AT探测就绪。
+ */
 void Turn_On_ML307C(void)
 {
     ML307C_Begin_PowerOn();
@@ -927,6 +955,10 @@ int ML307C_Send_SensorData(float *acc_mg, float *gyro_dps, ML307C_GPS_Data_t *gp
     return ML307C_MQTT_Publish(topic, json);
 }
 
+/**
+ * @brief 编码旧版全量JSON并发布，保留用于兼容和调试。
+ * @note 新产品事件队列链路使用ML307C_Send_EventReport()。
+ */
 int ML307C_Send_FullReport(int16_t v_x100, int16_t tilt_x100,
                            float *acc_mg, float *gyro_dps,
                            ML307C_GPS_Data_t *gps,
@@ -1000,6 +1032,21 @@ int ML307C_Send_FullReport(int16_t v_x100, int16_t tilt_x100,
     return ML307C_MQTT_Publish(topic, json);
 }
 
+/**
+ * @brief 将持久化事件、位置和RTC时间编码成量产JSON并以QoS 1发布。
+ * @param event 待上报事件记录。
+ * @param gps 可选GNSS结果，定位有效时优先使用。
+ * @param lbs 可选基站信息，仅在GNSS无效时使用。
+ * @param year 年，例如2026。
+ * @param mon 月，1~12。
+ * @param day 日，1~31。
+ * @param hour 时，0~23。
+ * @param min 分，0~59。
+ * @param sec 秒，0~59。
+ * @param topic MQTT目标主题。
+ * @param dup 0首次发送，1表示同一event_id重发。
+ * @return 1收到PUBACK，0参数、JSON长度或发布失败。
+ */
 int ML307C_Send_EventReport(const EventRecord_t *event,
                             ML307C_GPS_Data_t *gps,
                             ML307C_LBS_Data_t *lbs,
@@ -1053,6 +1100,11 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
     return ML307C_MQTT_PublishEx(topic, json, dup);
 }
 
+/**
+ * @brief 查询运营商时间并写入STM32 RTC。
+ * @return 1时间字段合法且HAL写入完成，0 AT/解析失败。
+ * @note 当前忽略CCLK时区后缀；RTC日期的星期字段固定填星期一。
+ */
 int ML307C_Sync_RTC(void)
 {
     extern RTC_HandleTypeDef hrtc;

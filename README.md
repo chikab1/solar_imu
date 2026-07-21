@@ -604,6 +604,38 @@ arm-none-eabi-objcopy -O binary build/Debug/solar_imu.elf build/Debug/solar_imu.
 | `Core/Src/event_store.c` | 最多3条Flash事件队列 |
 | `docs/service_protocol.md` | USART2协议字段级说明 |
 
+### 8.1 建议的源码阅读顺序
+
+1. 从 main() 开始，先看外设初始化、启动上报和 while (1) 中的三个动作：维护协议处理、完整上报、Stop1。
+2. 阅读 Enter_Stop1_Mode()，理解IMU、RTC、PA3维护唤醒的布防与恢复。Stop1唤醒后从WFI下一行继续，不会重新执行初始化。
+3. 阅读 Run_Event_Report()，它是业务总调度入口；再进入 Capture_Event_And_Start_Modem() 查看3秒IMU采样与ML307C开机并行过程。
+4. 阅读 lsm6ds.c，重点是 LSM6DS_Config_Gatekeeper()、LSM6DS_Set_Sleep_Mode() 和锁存源寄存器清除。
+5. 阅读 at_ml307c.c，调用链为AT就绪、IMEI、网络注册、MQTT连接、QoS 1发布、下行窗口和安全关机。
+6. 最后阅读 service_protocol.c、uart_driver.c 和 event_store.c，分别对应维护帧解析、底层串口收发和断网事件持久化。
+
+公共头文件使用Doxygen格式说明函数用途、参数、返回值、调用时机和副作用；源文件补充内部函数、模块静态状态与关键竞态处理。修改接口时应同时更新头文件注释、README协议字段和对应测试脚本。
+
+### 8.2 关键调用关系
+
+~~~text
+main while(1)
+├─ Service_Task()
+│  ├─ ServiceProtocol_Poll()/GetFrame()
+│  └─ Handle_Service_Frame()
+├─ Run_Event_Report()
+│  ├─ Capture_Event_And_Start_Modem()
+│  │  ├─ LSM6DS_Set_Active_Mode()/Read_Storage()
+│  │  └─ ML307C_Begin_PowerOn()/Poll_MATREADY()
+│  ├─ ML307C_Wait_Network()/MQTT_Connect()
+│  ├─ EventStore_Get()/Enqueue()/Remove()
+│  ├─ ML307C_Send_EventReport()
+│  └─ Turn_Off_ML307C()
+└─ Enter_Stop1_Mode()
+   ├─ LSM6DS_Set_Sleep_Mode()
+   ├─ IMU_Drain_INT1_Latch()
+   └─ RTC分段布防/WFI/串口引脚恢复
+~~~
+
 ## 9. 量产前必须完成的事项
 
 - MQTT改为TLS端口并为每台设备签发独立凭据或证书。

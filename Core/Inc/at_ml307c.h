@@ -25,43 +25,108 @@ extern "C" {
 #include <stdio.h>
 
 /* Exported constants --------------------------------------------------------*/
-#define ML307C_UART_HANDLE     (&huart1)
-#define ML307C_MAX_BUF_SIZE    (512)
-#define ML307C_DEFAULT_TIMEOUT (3000)
+#define ML307C_UART_HANDLE     (&huart1) /**< 模组连接的HAL UART句柄。 */
+#define ML307C_MAX_BUF_SIZE    (512)     /**< AT响应聚合缓冲区容量。 */
+#define ML307C_DEFAULT_TIMEOUT (3000)    /**< 普通AT命令默认超时，单位ms。 */
 
 /* Exported types ------------------------------------------------------------*/
 
+/** @brief GNSS解析结果；浮点数仅用于内部计算，MQTT上报时转换为整数。 */
 typedef struct {
-    float latitude;
-    float longitude;
-    int satellites;
-    int is_fixed;
+    float latitude;  /**< 纬度，十进制度，北纬为正。 */
+    float longitude; /**< 经度，十进制度，东经为正。 */
+    int satellites;  /**< 参与定位的卫星数量。 */
+    int is_fixed;    /**< 1定位有效，0尚未定位。 */
 } ML307C_GPS_Data_t;
 
+/** @brief 蜂窝基站定位原始参数。 */
 typedef struct {
-    int mcc;
-    int mnc;
-    int tac;
-    int cell_id;
-    int valid;
+    int mcc;     /**< Mobile Country Code，例如中国为460。 */
+    int mnc;     /**< Mobile Network Code。 */
+    int tac;     /**< LTE Tracking Area Code。 */
+    int cell_id; /**< LTE Cell Identity。 */
+    int valid;   /**< 1表示至少获得了可用MCC及TAC/Cell ID。 */
 } ML307C_LBS_Data_t;
 
+/** @brief 蜂窝注册和信号诊断结果。 */
 typedef struct {
-    int csq;
-    int is_attached;
+    int csq;         /**< AT+CSQ的RSSI值0~31，99表示未知。 */
+    int is_attached; /**< 1表示已注册并附着分组网络。 */
 } ML307C_Network_Status_t;
 
 /* Exported functions prototypes ---------------------------------------------*/
 
+/**
+ * @brief 发送一条AT命令并等待指定响应/URC。
+ * @param cmd 不含CRLF的AT命令字符串。
+ * @param expected_resp 判定成功的子字符串。
+ * @param timeout_ms 最长等待时间，单位ms。
+ * @return 1匹配成功，0超时/ERROR，-1参数或发送失败。
+ * @note 等待期间会喂IWDG并调用ML307C_Background_Poll()维护USART2服务。
+ */
 int  ML307C_Send_CMD(char *cmd, char *expected_resp, uint32_t timeout_ms);
+
+/**
+ * @brief 执行AT握手、关回显、SIM、CSQ和CGATT基础检查。
+ * @param status 可选输出网络状态，允许传NULL。
+ * @return 1全部通过，0任一步骤失败。
+ */
 int  ML307C_Network_Init(ML307C_Network_Status_t *status);
+
+/**
+ * @brief 配置MQTT会话并连接Broker。
+ * @param broker_url Broker域名或IP。
+ * @param port 端口，测试环境通常为1883。
+ * @param username 用户名。
+ * @param password 密码。
+ * @return 1收到连接成功URC，0失败/超时。
+ * @note Client ID自动使用`dev_<IMEI>`；调用前必须成功读取IMEI并注册网络。
+ */
 int  ML307C_MQTT_Connect(char *broker_url, int port, char *username, char *password);
+
+/**
+ * @brief 以QoS 1、retain=0、dup=0发布文本并等待PUBACK。
+ * @param topic MQTT主题。
+ * @param payload 文本或JSON，必须以`\0`结束。
+ * @return 1收到PUBACK，0失败。
+ */
 int  ML307C_MQTT_Publish(char *topic, char *payload);
+
+/**
+ * @brief ML307C_MQTT_Publish()的重传版本。
+ * @param topic MQTT主题。
+ * @param payload 文本或JSON。
+ * @param dup 0首次发布，1表示同一event_id的QoS重传。
+ * @return 1收到PUBACK，0失败。
+ */
 int  ML307C_MQTT_PublishEx(char *topic, char *payload, uint8_t dup);
+
+/**
+ * @brief 轮询CEREG直到注册成功，再检查CGATT和CSQ。
+ * @param timeout_ms 网络注册总预算，单位ms。
+ * @param status 可选输出状态，可为NULL。
+ * @return 1注册并附着成功，0超时/SIM/AT失败。
+ */
 int  ML307C_Wait_Network(uint32_t timeout_ms, ML307C_Network_Status_t *status);
+
+/** @brief 返回内部AT响应缓冲区，仅在下一条AT命令前有效。 */
 char* ML307C_Get_RxBuffer(void);
+
+/** @brief 清空AT聚合缓冲区和USART1软件环形队列。 */
 void ML307C_Clear_Buffer(void);
+
+/**
+ * @brief 丢弃一段时间内的残留URC，直到连续100 ms无新数据或达到预算。
+ * @param drain_ms 最大清理时间，单位ms。
+ */
 void ML307C_Drain_Rx(uint32_t drain_ms);
+
+/**
+ * @brief 不发送命令，只监听异步URC。
+ * @param expected 期望子字符串。
+ * @param timeout_ms 最长等待时间，单位ms。
+ * @return 匹配成功时返回内部缓冲区；超时返回NULL。
+ */
 const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms);
 
 /**
@@ -76,6 +141,8 @@ int  ML307C_Get_IMEI(void);
   * @retval 15字节IMEI字符串指针, 失败返回 "000000000000000"
   */
 const char* ML307C_Get_IMEI_Str(void);
+
+/** @brief 判断内部IMEI缓存是否有效。@return 1已读取，0尚未读取。 */
 uint8_t ML307C_Has_IMEI(void);
 
 /**
@@ -92,10 +159,31 @@ int ML307C_Send_CustomData(int16_t voltage_x100, int16_t angel_x100,
                            int16_t acc_x, int16_t acc_y, int16_t acc_z,
                            char *topic);
 
+/** @brief 打开GNSS并请求一次定位信息。@return 1命令接受，0失败。 */
 int  ML307C_GPS_Start(void);
+
+/**
+ * @brief 从ML307C GNSS响应中解析经纬度、卫星数和定位状态。
+ * @param uart_rx_buf 含定位响应的可写字符串缓冲区。
+ * @param gps_data 输出结构体。
+ * @return 1定位有效，0格式无效或尚未定位。
+ */
 int  ML307C_GPS_Parse(char *uart_rx_buf, ML307C_GPS_Data_t *gps_data);
+
+/** @brief 查询并解析MCC/MNC/TAC/Cell ID。@return 1有效，0失败。 */
 int  ML307C_Get_LBS_Info(ML307C_LBS_Data_t *lbs);
-int  ML307C_Send_SensorData(float *acc_mg, float *gyro_dps, ML307C_GPS_Data_t *gps_data, char *topic);
+
+/**
+ * @brief 发布旧版即时传感器JSON，保留用于调试兼容。
+ * @param acc_mg X/Y/Z加速度数组，单位mg。
+ * @param gyro_dps X/Y/Z角速度数组，单位dps。
+ * @param gps_data 可选GNSS结果。
+ * @param topic MQTT主题。
+ * @return 1发布成功，0失败。
+ * @note 产品事件链路应优先使用ML307C_Send_EventReport()。
+ */
+int  ML307C_Send_SensorData(float *acc_mg, float *gyro_dps,
+                            ML307C_GPS_Data_t *gps_data, char *topic);
 
 /**
   * @brief  全量数据上报 (纯整数 JSON, 杜绝 %f)
@@ -117,6 +205,21 @@ int ML307C_Send_FullReport(int16_t v_x100, int16_t tilt_x100,
                            int year, int mon, int day,
                            int hour, int min, int sec,
                            const char *wake_src, char *topic);
+/**
+ * @brief 把EventRecord_t、GNSS/LBS和RTC上下文编码为量产JSON并QoS 1发布。
+ * @param event 待发布事件，不可为NULL。
+ * @param gps 有效GNSS结果；可为NULL。
+ * @param lbs GNSS失败时使用的LBS结果；可为NULL。
+ * @param year 年，例如2026。
+ * @param mon 月1~12。
+ * @param day 日1~31。
+ * @param hour 小时0~23。
+ * @param min 分钟0~59。
+ * @param sec 秒0~59。
+ * @param topic `device/<IMEI>/data`主题。
+ * @param dup 0首次发送，1重发Flash队列事件。
+ * @return 1收到PUBACK，0编码或发布失败。
+ */
 int ML307C_Send_EventReport(const EventRecord_t *event,
                             ML307C_GPS_Data_t *gps,
                             ML307C_LBS_Data_t *lbs,
@@ -132,12 +235,29 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
   */
 int ML307C_Sync_RTC(void);
 
+/** @brief 完成2.3秒PWRKEY脉冲的阻塞式开机封装。 */
 void Turn_On_ML307C(void);
+
+/** @brief 发送安全关机命令并等待STATE拉低，超时执行硬件兜底。 */
 void Turn_Off_ML307C(void);
+
+/** @brief 通过RESET引脚硬复位ML307C，用于连续网络失败恢复。 */
 void ML307C_Hard_Reset(void);
+
+/** @brief 拉低模组PWRKEY并重启USART1接收；由并行采样流程开始时调用。 */
 void ML307C_Begin_PowerOn(void);
+
+/** @brief 释放PWRKEY，结束开机低脉冲。 */
 void ML307C_End_PowerOn_Pulse(void);
+
+/**
+ * @brief 非阻塞搬运USART1数据并搜索`+MATREADY`。
+ * @return 1已收到，0尚未收到。
+ * @note 供3秒IMU采样循环并行轮询，避免固定延时阻塞。
+ */
 uint8_t ML307C_Poll_MATREADY(void);
+
+/** @brief 读取ML307C STATE引脚。@return 1模组上电，0已关机。 */
 uint8_t ML307C_Is_Powered(void);
 
 #ifdef __cplusplus

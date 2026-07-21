@@ -1,3 +1,10 @@
+/**
+ * @file lsm6ds.c
+ * @brief LSM6DS3TR-C采样、倾角解算和WAKE-UP/6D低功耗唤醒配置。
+ *
+ * 产品运行时由硬件WAKE-UP或6D将INT1锁存拉高唤醒STM32，MCU随后连续
+ * 采样并用软件阈值二次确认。进入Stop1前关闭陀螺仪，事件采集时恢复六轴。
+ */
 #include "lsm6ds.h"
 #include "math.h"
 
@@ -13,9 +20,9 @@
  * ======================================================= */
 
 /* ---- 重力估计单位向量：初始指向地心 = (0, 0, 1)，即理想竖直姿态 ---- */
-static float s_est_nx = 0.0f;
-static float s_est_ny = 0.0f;
-static float s_est_nz = 1.0f;
+static float s_est_nx = 0.0f; /**< 互补滤波重力单位向量X分量。 */
+static float s_est_ny = 0.0f; /**< 互补滤波重力单位向量Y分量。 */
+static float s_est_nz = 1.0f; /**< 互补滤波重力单位向量Z分量。 */
 
 /**
   * @brief  重力基准互补滤波倾角解算（无需校准，上电即用）
@@ -103,11 +110,18 @@ void LSM6DS_Complementary_Tilt_Update(float ax, float ay, float az,
 /* ========================================================================== */
 
 /* 静态全局驱动实例 */
-static stmdev_ctx_t imu_ctx;
-static uint8_t s_sleep_mode_ready = 0U;
-static const uint8_t imu_addr = (0x6A << 1);  /* 7位地址 0x6A → 8位 0xD4 */
+static stmdev_ctx_t imu_ctx;                 /**< ST寄存器驱动上下文，绑定HAL I2C。 */
+static uint8_t s_sleep_mode_ready = 0U;      /**< 1表示INT1已清除旧标志并完成Stop1布防。 */
+static const uint8_t imu_addr = (0x6A << 1); /**< 7位地址0x6A转换为HAL使用的8位地址。 */
 
-/* I2C 平台桥接函数 —— 连接 lsm6ds3tr-c 驱动与 HAL 硬件 I2C */
+/**
+ * @brief ST寄存器驱动的HAL I2C写桥接函数。
+ * @param handle 由imu_ctx.handle传入的I2C_HandleTypeDef指针。
+ * @param reg 起始寄存器地址。
+ * @param buf 待写数据。
+ * @param len 字节数。
+ * @return 0成功，-1 HAL传输失败。
+ */
 static int32_t lsm6ds3tr_c_hal_write(void *handle, uint8_t reg,
                                       const uint8_t *buf, uint16_t len)
 {
@@ -118,6 +132,7 @@ static int32_t lsm6ds3tr_c_hal_write(void *handle, uint8_t reg,
     return (ret == HAL_OK) ? 0 : -1;
 }
 
+/** @brief ST寄存器驱动的HAL I2C读桥接函数，参数含义同写桥接。 */
 static int32_t lsm6ds3tr_c_hal_read(void *handle, uint8_t reg,
                                      uint8_t *buf, uint16_t len)
 {
@@ -199,6 +214,11 @@ uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps)
     return 1;
 }
 
+/**
+ * @brief 切换到事件采集模式：关闭INT1路由并以104 Hz开启加速度计和陀螺仪。
+ * @return 1全部寄存器配置成功，0 I2C配置失败。
+ * @note Capture_Event_And_Start_Modem()在3秒连续采样前调用。
+ */
 uint8_t LSM6DS_Set_Active_Mode(void)
 {
     lsm6ds3tr_c_int1_route_t int1_route = {0};
@@ -224,6 +244,11 @@ uint8_t LSM6DS_Set_Active_Mode(void)
     return 1;
 }
 
+/**
+ * @brief 切换到Stop1布防模式：52 Hz加速度计、陀螺仪关闭、WU和6D路由INT1。
+ * @return 1布防完成或此前已布防，0 I2C配置失败。
+ * @details 首次布防会等待传感器稳定并读取源寄存器清除旧锁存，之后再开放INT1。
+ */
 uint8_t LSM6DS_Set_Sleep_Mode(void)
 {
     lsm6ds3tr_c_int1_route_t int1_route = {0};
@@ -311,6 +336,10 @@ uint8_t LSM6DS_Config_Wakeup(uint8_t threshold, uint8_t duration)
     return 1;
 }
 
+/**
+ * @brief 读取ALL_INT_SRC并清除/报告旧版WAKE-UP锁存。
+ * @return 1本次读到WAKE-UP事件，0无事件或I2C失败。
+ */
 uint8_t LSM6DS_Clear_Wakeup(void)
 {
     lsm6ds3tr_c_all_sources_t all_sources;
@@ -496,10 +525,11 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
 }
 
 /**
-  * @brief Read and clear every source that can keep the latched INT1 high.
-  * @note  WAKE_UP_SRC clears WU and D6D_SRC clears 6D. TAP/FUNC sources are
-  *        also drained so a stale auxiliary latch cannot hold INT1 asserted.
-  */
+ * @brief 读取源寄存器以清除锁存INT1，并分别返回WAKE-UP和6D标志。
+ * @param out_wu 可选WAKE-UP输出；非NULL时写0或1。
+ * @param out_6d 可选6D输出；非NULL时写0或1。
+ * @note WAKE_UP_SRC负责清WU，D6D_SRC负责清6D；一次调用同时处理两个来源。
+ */
 void LSM6DS_Clear_All_Interrupts_Ex(uint8_t *out_wu, uint8_t *out_6d)
 {
     lsm6ds3tr_c_wake_up_src_t wu_src = {0};
@@ -519,6 +549,11 @@ void LSM6DS_Clear_All_Interrupts_Ex(uint8_t *out_wu, uint8_t *out_6d)
     }
 }
 
+/**
+ * @brief 读取8个关键配置寄存器，供USART2诊断命令核对实际布防状态。
+ * @param out_regs 长度至少8字节的输出数组，顺序见函数内addresses。
+ * @return 1全部读取成功，0参数无效或任一I2C读取失败。
+ */
 uint8_t LSM6DS_Get_Gatekeeper_Diag(uint8_t out_regs[8])
 {
     static const uint8_t addresses[8] = {

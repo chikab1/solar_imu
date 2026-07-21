@@ -1,7 +1,16 @@
+/**
+ * @file service_protocol.c
+ * @brief USART2维护口二进制协议的流式解析、排队与应答编码。
+ *
+ * 接收帧格式：55 AA | version | command | sequence | length(LE16) |
+ * payload | CRC16(LE16) | 0D 0A。解析器允许一次Feed半帧、整帧或多帧，
+ * 且能从噪声、超时半帧和错误CRC中重新同步。
+ */
 #include "service_protocol.h"
 #include "usart.h"
 #include <string.h>
 
+/** @brief 逐字节接收状态机的当前位置。 */
 typedef enum {
     PARSER_WAIT_55 = 0,
     PARSER_WAIT_AA,
@@ -17,29 +26,31 @@ typedef enum {
     PARSER_TAIL_0A
 } ParserState_t;
 
-static ParserState_t s_state;
-static ServiceFrame_t s_work_frame;
-static ServiceFrame_t s_frame_queue[SERVICE_PROTOCOL_QUEUE_DEPTH];
-static volatile uint8_t s_frame_head;
-static volatile uint8_t s_frame_tail;
-static volatile uint8_t s_frame_count;
+static ParserState_t s_state;             /**< 当前解析状态。 */
+static ServiceFrame_t s_work_frame;       /**< 尚未完成校验的工作帧。 */
+static ServiceFrame_t s_frame_queue[SERVICE_PROTOCOL_QUEUE_DEPTH]; /**< 已校验命令队列。 */
+static volatile uint8_t s_frame_head;  /**< 下一条完整帧的写入位置。 */
+static volatile uint8_t s_frame_tail;  /**< 主循环下一条完整帧的读取位置。 */
+static volatile uint8_t s_frame_count; /**< 当前排队的完整帧数量。 */
+/** @brief 延迟到主循环发送的协议错误响应。 */
 typedef struct {
-    uint8_t command;
-    uint8_t sequence;
-    uint8_t status;
+    uint8_t command;  /**< 出错请求的功能码。 */
+    uint8_t sequence; /**< 出错请求的序列号。 */
+    uint8_t status;   /**< SERVICE_STATUS_*错误码。 */
 } ServiceError_t;
 static ServiceError_t s_error_queue[SERVICE_PROTOCOL_QUEUE_DEPTH];
-static volatile uint8_t s_error_head;
-static volatile uint8_t s_error_tail;
-static volatile uint8_t s_error_count;
-static volatile uint8_t s_wake_ping_count;
-static volatile uint16_t s_drop_count;
-static volatile uint16_t s_timeout_count;
-static volatile uint16_t s_uart_error_count;
-static uint16_t s_payload_pos;
-static uint16_t s_rx_crc;
-static uint32_t s_last_byte_tick;
+static volatile uint8_t s_error_head;  /**< 下一条错误记录写入位置。 */
+static volatile uint8_t s_error_tail;  /**< 下一条错误记录读取位置。 */
+static volatile uint8_t s_error_count; /**< 当前等待应答的错误数量。 */
+static volatile uint8_t s_wake_ping_count;   /**< 尚未应答的单字节唤醒令牌数。 */
+static volatile uint16_t s_drop_count;       /**< 因队列满而丢弃的帧/错误数。 */
+static volatile uint16_t s_timeout_count;    /**< 半帧接收超时累计值。 */
+static volatile uint16_t s_uart_error_count; /**< HAL报告的维护串口错误累计值。 */
+static uint16_t s_payload_pos;               /**< 当前payload写入位置。 */
+static uint16_t s_rx_crc;                    /**< 帧中携带的CRC16。 */
+static uint32_t s_last_byte_tick;             /**< 最近字节到达的HAL毫秒时刻。 */
 
+/** @brief 使用CRC-16/CCITT-FALSE多项式0x1021更新一个字节。 */
 static uint16_t ServiceProtocol_Crc16Update(uint16_t crc, uint8_t data)
 {
     crc ^= (uint16_t)data << 8;
@@ -50,6 +61,10 @@ static uint16_t ServiceProtocol_Crc16Update(uint16_t crc, uint8_t data)
     return crc;
 }
 
+/**
+ * @brief 计算从version到payload末尾的帧CRC。
+ * @param frame 待编码或校验的帧。
+ */
 static uint16_t ServiceProtocol_FrameCrc(const ServiceFrame_t *frame)
 {
     uint16_t crc = 0xFFFFU;
@@ -64,6 +79,7 @@ static uint16_t ServiceProtocol_FrameCrc(const ServiceFrame_t *frame)
     return crc;
 }
 
+/** @brief 丢弃当前半帧并回到等待0x55帧头的状态。 */
 static void ServiceProtocol_ResetParser(void)
 {
     s_state = PARSER_WAIT_55;
@@ -72,11 +88,13 @@ static void ServiceProtocol_ResetParser(void)
     memset(&s_work_frame, 0, sizeof(s_work_frame));
 }
 
+/** @brief 对16位诊断计数器做饱和加一，避免回绕后误判为无错误。 */
 static void ServiceProtocol_Increment(volatile uint16_t *value)
 {
     if (*value < 0xFFFFU) (*value)++;
 }
 
+/** @brief 将协议错误加入主循环待回复队列；队列满时记录drop。 */
 static void ServiceProtocol_QueueError(uint8_t command, uint8_t sequence,
                                        uint8_t status)
 {
@@ -91,6 +109,7 @@ static void ServiceProtocol_QueueError(uint8_t command, uint8_t sequence,
     s_error_count++;
 }
 
+/** @brief 当前半帧超过字节间超时时间时复位解析器。 */
 static void ServiceProtocol_ExpirePartial(uint32_t now)
 {
     if (s_state == PARSER_WAIT_55 ||
@@ -102,6 +121,7 @@ static void ServiceProtocol_ExpirePartial(uint32_t now)
     ServiceProtocol_ResetParser();
 }
 
+/** @brief 清空命令/错误/唤醒队列、诊断计数和流式解析状态。 */
 void ServiceProtocol_Init(void)
 {
     s_frame_head = 0U;
@@ -118,6 +138,12 @@ void ServiceProtocol_Init(void)
     ServiceProtocol_ResetParser();
 }
 
+/**
+ * @brief 向流式解析器输入任意长度的串口字节。
+ * @param data 数据块首地址，NULL时忽略。
+ * @param length 数据字节数，可跨帧边界。
+ * @note 通常由Service_Task()读取USART2软件环形缓冲后调用。
+ */
 void ServiceProtocol_Feed(const uint8_t *data, uint16_t length)
 {
     if (data == NULL) return;
@@ -225,6 +251,7 @@ void ServiceProtocol_Feed(const uint8_t *data, uint16_t length)
     }
 }
 
+/** @brief 无新字节时检查半帧超时；应在主循环周期调用。 */
 void ServiceProtocol_Poll(void)
 {
     __disable_irq();
@@ -232,6 +259,7 @@ void ServiceProtocol_Poll(void)
     __enable_irq();
 }
 
+/** @brief 取出最早一条已通过版本和CRC校验的请求帧。 */
 uint8_t ServiceProtocol_GetFrame(ServiceFrame_t *out_frame)
 {
     if (out_frame == NULL) return 0U;
@@ -247,6 +275,7 @@ uint8_t ServiceProtocol_GetFrame(ServiceFrame_t *out_frame)
     return 1U;
 }
 
+/** @brief 取出一条待应答的协议错误及其原始功能码、序列号。 */
 uint8_t ServiceProtocol_GetError(uint8_t *command, uint8_t *sequence,
                                  uint8_t *status)
 {
@@ -265,6 +294,7 @@ uint8_t ServiceProtocol_GetError(uint8_t *command, uint8_t *sequence,
     return 1U;
 }
 
+/** @brief 消费一个单字节唤醒令牌，存在时返回1。 */
 uint8_t ServiceProtocol_GetWakePing(void)
 {
     __disable_irq();
@@ -277,6 +307,10 @@ uint8_t ServiceProtocol_GetWakePing(void)
     return 1U;
 }
 
+/**
+ * @brief 串口停止/重启后丢弃半帧状态，但保留已完成命令队列。
+ * @note 保存并恢复PRIMASK，可从已有临界区安全调用。
+ */
 void ServiceProtocol_ResetReceiver(void)
 {
     uint32_t primask = __get_PRIMASK();
@@ -287,6 +321,7 @@ void ServiceProtocol_ResetReceiver(void)
     if (primask == 0U) __enable_irq();
 }
 
+/** @brief 记录UART错误并丢弃可能已损坏的半帧。 */
 void ServiceProtocol_NotifyUartError(void)
 {
     uint32_t primask = __get_PRIMASK();
@@ -296,10 +331,22 @@ void ServiceProtocol_NotifyUartError(void)
     if (primask == 0U) __enable_irq();
 }
 
+/** @brief 返回协议队列累计丢帧数。 */
 uint16_t ServiceProtocol_GetDropCount(void) { return s_drop_count; }
+/** @brief 返回累计半帧超时数。 */
 uint16_t ServiceProtocol_GetTimeoutCount(void) { return s_timeout_count; }
+/** @brief 返回累计USART2错误数。 */
 uint16_t ServiceProtocol_GetUartErrorCount(void) { return s_uart_error_count; }
 
+/**
+ * @brief 构造并发送标准响应帧。
+ * @param command 请求功能码；发送时自动置最高位形成响应功能码。
+ * @param sequence 原样回显请求序列号，便于上位机匹配请求和响应。
+ * @param status SERVICE_STATUS_*执行结果，作为响应payload首字节。
+ * @param payload 可选业务数据，不包含status。
+ * @param length 业务数据长度，最大SERVICE_PROTOCOL_MAX_PAYLOAD-1。
+ * @note 当前使用HAL阻塞发送；首次失败会清UART错误标志并重试一次。
+ */
 void ServiceProtocol_SendResponse(uint8_t command, uint8_t sequence,
                                   uint8_t status,
                                   const uint8_t *payload, uint16_t length)
@@ -340,6 +387,7 @@ void ServiceProtocol_SendResponse(uint8_t command, uint8_t sequence,
     }
 }
 
+/** @brief 回复单字节SERVICE_PROTOCOL_WAKE_TOKEN，序列号固定为0。 */
 void ServiceProtocol_SendWakeAck(void)
 {
     ServiceProtocol_SendResponse(SERVICE_CMD_WAKE, 0U, SERVICE_STATUS_OK, NULL, 0U);

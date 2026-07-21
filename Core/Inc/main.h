@@ -37,23 +37,28 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
+/** @brief 可通过维护串口/服务器下发并保存到RTC备份寄存器的运行配置。 */
 typedef struct {
-    uint32_t magic;     /* 0x55AA55AA - 魔法数字, 判断备份域是否已初始化 */
-    uint16_t wu_mg;     /* 加速度计唤醒门限 (mg), 默认 300 */
-    uint16_t tilt_deg;  /* 6D 倾角触发门限 (度), 默认 30 */
-    uint32_t sleep_sec; /* RTC 周期唤醒间隔 (秒), 默认 3600 */
-    uint16_t v_low_mv;  /* 低压熔断阈值 (mV), 默认 3300 */
-    uint8_t  mount_axis; /* Fixed zero reference: Z+, Z-, X+, X-, Y+, Y- */
+    uint32_t magic;      /**< 配置有效标记；不匹配时恢复出厂值。 */
+    uint16_t wu_mg;      /**< IMU运动唤醒阈值，单位mg，默认500。 */
+    uint16_t tilt_deg;   /**< 相对安装零轴的倾角报警阈值，单位度，默认30。 */
+    uint32_t sleep_sec;  /**< 无事件时RTC心跳/上报周期，单位秒，默认3600。 */
+    uint16_t v_low_mv;   /**< 禁止启动4G的低压熔断阈值，单位mV，默认3550。 */
+    uint8_t  mount_axis; /**< 固定零度参考轴，取MountAxis_t。 */
 } SysConfig_t;
 
+/** @brief 设备安装时“0度”所对应的重力正/负轴方向。 */
 typedef enum {
-    MOUNT_AXIS_Z_POS = 0,
-    MOUNT_AXIS_Z_NEG = 1,
-    MOUNT_AXIS_X_POS = 2,
-    MOUNT_AXIS_X_NEG = 3,
-    MOUNT_AXIS_Y_POS = 4,
-    MOUNT_AXIS_Y_NEG = 5
+    MOUNT_AXIS_Z_POS = 0, /**< +Z与重力同向时为0度。 */
+    MOUNT_AXIS_Z_NEG = 1, /**< -Z与重力同向时为0度。 */
+    MOUNT_AXIS_X_POS = 2, /**< +X与重力同向时为0度。 */
+    MOUNT_AXIS_X_NEG = 3, /**< -X与重力同向时为0度。 */
+    MOUNT_AXIS_Y_POS = 4, /**< +Y与重力同向时为0度。 */
+    MOUNT_AXIS_Y_NEG = 5  /**< -Y与重力同向时为0度。 */
 } MountAxis_t;
+
+/** @brief 主循环待执行任务；CMD_TEST代表运行一遍完整事件上报流程。 */
+typedef enum { CMD_NONE = 0, CMD_ON, CMD_OFF, CMD_SLEEP, CMD_VBAT, CMD_MQTT, CMD_TEST } PendingCmd_t;
 
 /* USER CODE END ET */
 
@@ -68,9 +73,38 @@ typedef enum {
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
+/** @brief HAL/CubeMX初始化遇到不可恢复错误时关闭中断并停机。 */
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+
+/* 函数原型 — 跨模块调用 */
+void SystemClock_Config(void);
+
+/* 模块间共享变量 — 定义在 main.c, 其他模块通过 extern 引用 */
+
+extern volatile PendingCmd_t g_pending_cmd;
+
+/* Stop1唤醒源和串口恢复 flags (HAL回调写入) */
+extern volatile uint8_t  g_uart2_wakeup_flag;
+extern volatile uint8_t  g_uart2_activity_flag;
+extern volatile uint8_t  g_uart2_rearm_needed;
+extern volatile uint8_t  g_uart1_rearm_needed;
+extern volatile uint8_t  g_rtc_wakeup_flag;
+extern volatile uint8_t  g_imu_exti_wakeup_flag;
+extern volatile uint16_t g_imu_exti_wake_count;
+extern volatile uint16_t g_rtc_callback_count;
+
+/* 主循环与事件上报间的状态传递 */
+extern uint8_t  g_report_wu;
+extern uint8_t  g_report_6d;
+extern uint8_t  g_report_rtc;
+extern uint8_t  g_report_source_fallback;
+
+/* 启动诊断 */
+extern uint8_t g_iwdg_runs_in_stop;
+extern uint8_t g_imu_ok;
+extern uint8_t g_reset_reason;
 
 /* USER CODE END EFP */
 

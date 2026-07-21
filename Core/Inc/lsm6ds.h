@@ -11,11 +11,46 @@ extern "C" {
 #include <stdint.h>
 
 /* Exported functions prototypes ---------------------------------------------*/
+/**
+ * @brief 绑定I2C、校验WHO_AM_I并把加速度计/陀螺仪初始化为52 Hz。
+ * @param hi2c 与LSM6DS3TR-C连接的HAL I2C句柄，本项目传`&hi2c2`。
+ * @return 1初始化成功；0表示I2C失败或器件ID不匹配。
+ * @note 在MX_I2C2_Init()之后调用一次，再调用LSM6DS_Config_Gatekeeper()。
+ */
 uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c);
+
+/**
+ * @brief 读取一组加速度和角速度并转换为物理单位。
+ * @param acc_mg 输出X/Y/Z加速度，单位mg，数组至少3个float。
+ * @param gyro_dps 输出X/Y/Z角速度，单位dps，数组至少3个float。
+ * @return 1读取成功；0表示任一I2C读取失败。
+ */
 uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps);
+
+/**
+ * @brief 进入事件采样工作点：加速度计和陀螺仪104 Hz，并暂时屏蔽INT1路由。
+ * @return 1成功，0表示I2C配置失败。
+ * @note 唤醒后、开始3秒采样前调用；采样完成必须调用LSM6DS_Set_Sleep_Mode()重新布防。
+ */
 uint8_t LSM6DS_Set_Active_Mode(void);
+
+/**
+ * @brief 进入低功耗监测工作点：加速度计52 Hz、陀螺仪关闭、WU+6D路由INT1。
+ * @return 1成功，0表示I2C配置失败。
+ * @note 该函数可重复调用；已布防时直接返回成功，避免误清除新事件。
+ */
 uint8_t LSM6DS_Set_Sleep_Mode(void);
+
+/**
+ * @brief 单独配置传统Wake-Up中断，供调试/兼容代码使用。
+ * @param threshold WAKE_UP_THS低6位寄存器值，不是mg。
+ * @param duration WAKE_UP_DUR寄存器持续时间值。
+ * @return 1成功，0失败。
+ * @note 正常产品流程使用LSM6DS_Config_Gatekeeper()，不要同时混用两套配置入口。
+ */
 uint8_t LSM6DS_Config_Wakeup(uint8_t threshold, uint8_t duration);
+
+/** @brief 读取并清除Wake-Up锁存。@return 1本次有WU事件，0无事件或读取失败。 */
 uint8_t LSM6DS_Clear_Wakeup(void);
 
 /**
@@ -65,14 +100,6 @@ uint8_t LSM6DS_Config_6D_Wakeup(void);
 uint8_t LSM6DS_Clear_6D_Wakeup(void);
 
 /**
-  * @brief  工业级双重复合门卫：WAKE-UP + 6D 双中断源同时路由到 INT1
-  * @note   通道一 (int1_wu)：运动唤醒，阈值=2 (62.5mg)，秒杀暴力破坏
-  *         通道二 (int1_6d)：6D姿态检测，DEG_60 (30°边界)，防慢速偷盗
-  *         强关4D模式防止贴地平躺Z轴盲区漏报
-  *         中断锁存模式 (LATCHED)，确保上升沿万无一失
-  * @retval 1-成功, 0-失败
-  */
-/**
   * @brief  双门卫配置：WAKE-UP + 6D 同时路由 INT1 (用户填入物理量，内部自动映射)
   *
   * @param  wu_mg:   WAKE-UP 加速度阈值，单位 mg (毫克)
@@ -98,12 +125,20 @@ uint8_t LSM6DS_Clear_6D_Wakeup(void);
   * @retval 1-成功, 0-失败
   */
 uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d);
+
+/**
+ * @brief 一次读取8个关键寄存器，供USART2 GET_IMU_DIAG诊断。
+ * @param out_regs 输出数组，依次为CTRL1_XL、CTRL8_XL、CTRL10_C、TAP_CFG、
+ *                 TAP_THS_6D、WAKE_UP_THS、WAKE_UP_DUR、MD1_CFG。
+ * @return 1全部读取成功；0参数无效或I2C失败。
+ */
 uint8_t LSM6DS_Get_Gatekeeper_Diag(uint8_t out_regs[8]);
 
 /**
-  * @brief  读清 IMU 全部中断源锁存 (WAKE_UP + D6D + TAP 等全部源寄存器)
-  * @note   必须调用此函数来一次性解锁 INT1 引脚，否则下次进 Stop 无法再唤醒
-  * @retval 1-存在任意中断事件, 0-无事件
+  * @brief 读取并清除WAKE_UP_SRC和D6D_SRC锁存，同时返回两个来源标志。
+  * @param out_wu 输出Wake-Up触发标志，可为NULL。
+  * @param out_6d 输出6D触发标志，可为NULL。
+  * @note INT1为锁存推挽输出，进入下一次Stop1前必须读源寄存器并确认PB1已回到低电平。
   */
 void LSM6DS_Clear_All_Interrupts_Ex(uint8_t *out_wu, uint8_t *out_6d);
 
