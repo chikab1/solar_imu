@@ -59,7 +59,32 @@ inter-byte silence, so it cannot consume the next valid frame.
 | MODEM_OFF | `08` | Empty |
 | GET_IMU_DIAG | `09` | Empty |
 | SET_MOUNT | `0A` | `mount_axis:u8` |
+| GET_PITCH | `10` | Empty |
+| GET_ROLL | `11` | Empty |
+| GET_ANGLE | `12` | Empty |
 | WAKE | `7F` | Device-generated wake acknowledgement |
+
+Angle response data after the status byte:
+
+- GET_PITCH: `pitch_cdeg:i16`
+- GET_ROLL: `roll_cdeg:i16`
+- GET_ANGLE: `pitch_cdeg:i16, roll_cdeg:i16`
+
+The signed values are little-endian and use 0.01 degree units. For example,
+`235` means `+2.35 degrees`, and `-152` means `-1.52 degrees`. A sensor read
+failure returns status `06` with no angle data.
+
+V1.1 pitch and roll use the native LSM6DS sensor coordinate system:
+
+`pitch = atan2(ax, sqrt(ay^2 + az^2))`
+
+`roll = atan2(ay, sqrt(ax^2 + az^2))`
+
+They do not apply `mount_axis` or an installation-coordinate transform.
+Installation-direction correction is reserved for a later protocol version.
+The wire resolution is 0.01 degree. The fixed-point algorithm has been
+verified within approximately 0.05 degree of the reference formula; actual
+measurement accuracy also depends on sensor noise, temperature, and mounting.
 
 GET_STATUS response data after the status byte:
 

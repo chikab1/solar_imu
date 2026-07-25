@@ -228,6 +228,29 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
       Config_Save();
     }
     break;
+  case SERVICE_CMD_GET_PITCH:
+  case SERVICE_CMD_GET_ROLL:
+  case SERVICE_CMD_GET_ANGLE: {
+    int16_t pitch_cdeg;
+    int16_t roll_cdeg;
+
+    if (frame->length != 0U) {
+      status = SERVICE_STATUS_BAD_LENGTH;
+    } else if (!IMU_Get_Angle(&pitch_cdeg, &roll_cdeg)) {
+      status = SERVICE_STATUS_FAILED;
+    } else if (frame->command == SERVICE_CMD_GET_PITCH) {
+      Write_LE16(&response[0], (uint16_t)pitch_cdeg);
+      response_len = 2U;
+    } else if (frame->command == SERVICE_CMD_GET_ROLL) {
+      Write_LE16(&response[0], (uint16_t)roll_cdeg);
+      response_len = 2U;
+    } else {
+      Write_LE16(&response[0], (uint16_t)pitch_cdeg);
+      Write_LE16(&response[2], (uint16_t)roll_cdeg);
+      response_len = 4U;
+    }
+    break;
+  }
   default:
     status = SERVICE_STATUS_BAD_COMMAND;
     break;

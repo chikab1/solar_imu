@@ -30,6 +30,9 @@ typedef enum {
     SERVICE_CMD_MODEM_OFF    = 0x08, /**< 人工关闭ML307C。 */
     SERVICE_CMD_GET_IMU_DIAG = 0x09, /**< 读取IMU寄存器和中断统计。 */
     SERVICE_CMD_SET_MOUNT    = 0x0A, /**< 设置固定安装零度轴。 */
+    SERVICE_CMD_GET_PITCH    = 0x10, /**< Read sensor-coordinate pitch. */
+    SERVICE_CMD_GET_ROLL     = 0x11, /**< Read sensor-coordinate roll. */
+    SERVICE_CMD_GET_ANGLE    = 0x12, /**< Read pitch and roll together. */
     SERVICE_CMD_WAKE         = 0x7F  /**< 设备生成的USART2 READY通知。 */
 } ServiceCommand_t;
 
