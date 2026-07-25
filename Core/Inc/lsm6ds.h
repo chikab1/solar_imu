@@ -28,6 +28,32 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c);
 uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps);
 
 /**
+ * @brief Read pitch and roll in the native LSM6DS sensor coordinate system.
+ * @param pitch_cdeg Output pitch in 0.01 degree, range -9000 to 9000.
+ * @param roll_cdeg Output roll in 0.01 degree, range -9000 to 9000.
+ * @return 1 on success; 0 on invalid parameters, I2C failure, or invalid
+ *         acceleration magnitude.
+ * @note V1.1 does not apply mount_axis or any installation-coordinate
+ *       transform. This read-only function does not change IMU registers,
+ *       Wake-Up, 6D, INT1, or the current power mode.
+ */
+uint8_t IMU_Get_Angle(int16_t *pitch_cdeg, int16_t *roll_cdeg);
+
+/**
+ * @brief Read sensor-coordinate pitch in 0.01 degree.
+ * @param pitch_cdeg Output pitch, range -9000 to 9000.
+ * @return 1 on success; 0 on failure.
+ */
+uint8_t IMU_Get_Pitch(int16_t *pitch_cdeg);
+
+/**
+ * @brief Read sensor-coordinate roll in 0.01 degree.
+ * @param roll_cdeg Output roll, range -9000 to 9000.
+ * @return 1 on success; 0 on failure.
+ */
+uint8_t IMU_Get_Roll(int16_t *roll_cdeg);
+
+/**
  * @brief 进入事件采样工作点：加速度计和陀螺仪104 Hz，并暂时屏蔽INT1路由。
  * @return 1成功，0表示I2C配置失败。
  * @note 唤醒后、开始3秒采样前调用；采样完成必须调用LSM6DS_Set_Sleep_Mode()重新布防。

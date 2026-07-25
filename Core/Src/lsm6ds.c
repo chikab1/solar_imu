@@ -182,6 +182,142 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
     return 1;
 }
 
+/* V1.1 angle reads average a small, fixed number of samples without retaining
+ * history. At the sleep-mode 52 Hz ODR, 20 ms allows each read to observe a
+ * new accelerometer sample. No IMU register is written by this path. */
+#define IMU_ANGLE_SAMPLE_COUNT       8U
+#define IMU_ANGLE_SAMPLE_DELAY_MS   20U
+#define IMU_ANGLE_VECTOR_SHIFT      12U
+#define IMU_ANGLE_MIN_ABS_SUM_RAW 1024L
+
+/** @brief Return floor(sqrt(value)) using only 32-bit integer operations. */
+static uint32_t IMU_Integer_Sqrt(uint32_t value)
+{
+    uint32_t remainder = value;
+    uint32_t result = 0U;
+    uint32_t bit = 1UL << 30;
+
+    while (bit > remainder) bit >>= 2;
+    while (bit != 0U) {
+        if (remainder >= result + bit) {
+            remainder -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+    return result;
+}
+
+/** @brief Signed right shift with defined truncation toward zero. */
+static int32_t IMU_Shift_Right(int32_t value, uint8_t shift)
+{
+    if (value >= 0) return value >> shift;
+    return -(int32_t)(((uint32_t)(-value)) >> shift);
+}
+
+/** @brief Fixed-point CORDIC atan2 for x >= 0, returned in 0.01 degree. */
+static int16_t IMU_Atan2_Cdeg(int32_t y, uint32_t x)
+{
+    static const int16_t atan_table_cdeg[14] = {
+        4500, 2657, 1404, 713, 358, 179, 90,
+        45, 22, 11, 6, 3, 1, 1
+    };
+    int32_t vector_x;
+    int32_t vector_y;
+    int32_t angle = 0;
+
+    if (x == 0U) {
+        if (y > 0) return 9000;
+        if (y < 0) return -9000;
+        return 0;
+    }
+
+    vector_x = (int32_t)x * (int32_t)(1UL << IMU_ANGLE_VECTOR_SHIFT);
+    vector_y = y * (int32_t)(1UL << IMU_ANGLE_VECTOR_SHIFT);
+
+    for (uint8_t i = 0U; i < 14U && vector_y != 0; i++) {
+        int32_t x_step = IMU_Shift_Right(vector_x, i);
+        int32_t y_step = IMU_Shift_Right(vector_y, i);
+        int32_t next_x;
+
+        if (vector_y > 0) {
+            next_x = vector_x + y_step;
+            vector_y -= x_step;
+            angle += atan_table_cdeg[i];
+        } else {
+            next_x = vector_x - y_step;
+            vector_y += x_step;
+            angle -= atan_table_cdeg[i];
+        }
+        vector_x = next_x;
+    }
+
+    if (angle > 9000) angle = 9000;
+    if (angle < -9000) angle = -9000;
+    return (int16_t)angle;
+}
+
+/** @brief Read sensor-coordinate pitch and roll without changing IMU setup. */
+uint8_t IMU_Get_Angle(int16_t *pitch_cdeg, int16_t *roll_cdeg)
+{
+    int32_t sum[3] = {0, 0, 0};
+    int16_t raw_acc[3];
+    int32_t ax;
+    int32_t ay;
+    int32_t az;
+    uint32_t pitch_base;
+    uint32_t roll_base;
+
+    if (pitch_cdeg == NULL || roll_cdeg == NULL) return 0U;
+
+    for (uint8_t sample = 0U; sample < IMU_ANGLE_SAMPLE_COUNT; sample++) {
+        if (lsm6ds3tr_c_acceleration_raw_get(&imu_ctx, raw_acc) != 0) {
+            return 0U;
+        }
+        sum[0] += raw_acc[0];
+        sum[1] += raw_acc[1];
+        sum[2] += raw_acc[2];
+        if (sample + 1U < IMU_ANGLE_SAMPLE_COUNT) {
+            HAL_Delay(IMU_ANGLE_SAMPLE_DELAY_MS);
+        }
+    }
+
+    ax = sum[0] / (int32_t)IMU_ANGLE_SAMPLE_COUNT;
+    ay = sum[1] / (int32_t)IMU_ANGLE_SAMPLE_COUNT;
+    az = sum[2] / (int32_t)IMU_ANGLE_SAMPLE_COUNT;
+
+    if ((ax < 0 ? -ax : ax) +
+        (ay < 0 ? -ay : ay) +
+        (az < 0 ? -az : az) < IMU_ANGLE_MIN_ABS_SUM_RAW) {
+        return 0U;
+    }
+
+    pitch_base = IMU_Integer_Sqrt(
+        (uint32_t)(ay * ay) + (uint32_t)(az * az));
+    roll_base = IMU_Integer_Sqrt(
+        (uint32_t)(ax * ax) + (uint32_t)(az * az));
+
+    *pitch_cdeg = IMU_Atan2_Cdeg(ax, pitch_base);
+    *roll_cdeg = IMU_Atan2_Cdeg(ay, roll_base);
+    return 1U;
+}
+
+uint8_t IMU_Get_Pitch(int16_t *pitch_cdeg)
+{
+    int16_t roll_cdeg;
+    if (pitch_cdeg == NULL) return 0U;
+    return IMU_Get_Angle(pitch_cdeg, &roll_cdeg);
+}
+
+uint8_t IMU_Get_Roll(int16_t *roll_cdeg)
+{
+    int16_t pitch_cdeg;
+    if (roll_cdeg == NULL) return 0U;
+    return IMU_Get_Angle(&pitch_cdeg, roll_cdeg);
+}
+
 /**
   * @brief  读取六轴传感器数据并转换为物理量
   * @param  acc_mg: 加速度输出数组 (mg)，长度 3 [X, Y, Z]
