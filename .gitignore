@@ -1,7 +1,14 @@
 build/
+pc_tool/.venv/
+pc_tool/build/
+pc_tool/dist/
+pc_tool/.pytest_cache/
+pc_tool/.artifacts/
+pc_tool/**/__pycache__/
 mx.scratch
 !.settings
 tmp/
 __pycache__/
 *.py[cod]
 *.log
+*.spec

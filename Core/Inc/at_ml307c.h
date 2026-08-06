@@ -31,12 +31,23 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 
+/** @brief GNSS失败诊断码，编码为事件JSON`loc`字段的`"Err<N>"`。 */
+typedef enum {
+    ML307C_LOC_ERR_START = 0, /**< 配置或启动GNSS命令未成功。 */
+    ML307C_LOC_ERR_TIMEOUT,   /**< 等待超时，未获得有效定位。 */
+    ML307C_LOC_ERR_URC,       /**< 收到+ MGNSSLOC但数据无效。 */
+    ML307C_LOC_ERR_STOP       /**< 主动关闭GNSS未成功。 */
+} ML307C_LOC_Err_t;
+
+#define ML307C_LOC_ERR_UNKNOWN (-1) /**< 未发起定位或无诊断信息。 */
+
 /** @brief GNSS解析结果；浮点数仅用于内部计算，MQTT上报时转换为整数。 */
 typedef struct {
     float latitude;  /**< 纬度，十进制度，北纬为正。 */
     float longitude; /**< 经度，十进制度，东经为正。 */
     int satellites;  /**< 参与定位的卫星数量。 */
     int is_fixed;    /**< 1定位有效，0尚未定位。 */
+    int err_code;    /**< ML307C_LOC_Err_t；-1表示无诊断信息。 */
 } ML307C_GPS_Data_t;
 
 /** @brief 蜂窝基站定位原始参数。 */
@@ -159,8 +170,25 @@ int ML307C_Send_CustomData(int16_t voltage_x100, int16_t angel_x100,
                            int16_t acc_x, int16_t acc_y, int16_t acc_z,
                            char *topic);
 
-/** @brief 打开GNSS并请求一次定位信息。@return 1命令接受，0失败。 */
+/**
+ * @brief 配置`+MGNSSLOC`上报并启动GNSS单次定位。
+ * @return 1两条启动命令均收到OK，0任一步骤失败。
+ * @note 严格顺序发送`AT+MGNSSLOC=1`和`AT+MGNSS=2`；随后应调用
+ *       ML307C_GPS_Wait_Fix()纯监听异步`+MGNSSLOC:` URC。
+ */
 int  ML307C_GPS_Start(void);
+
+/**
+ * @brief 纯监听异步`+MGNSSLOC:` URC直到获得2D/3D定位或超时。
+ * @param gps_data 输出定位数据，不可为NULL；失败时err_code为ML307C_LOC_Err_t。
+ * @param timeout_ms 应用层给出的最长等待时间，单位ms。
+ * @return 1已收到并解析有效2D/3D定位，0超时、无效URC或参数错误。
+ * @note 不发送AT指令、不清空UART RX；每轮维护IWDG和后台服务。
+ */
+int  ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms);
+
+/** @brief 主动关闭仍在搜索的GNSS。@return 1收到OK，0失败。 */
+int  ML307C_GPS_Stop(void);
 
 /**
  * @brief 从ML307C GNSS响应中解析经纬度、卫星数和定位状态。
@@ -208,7 +236,8 @@ int ML307C_Send_FullReport(int16_t v_x100, int16_t tilt_x100,
 /**
  * @brief 把EventRecord_t、GNSS/LBS和RTC上下文编码为量产JSON并QoS 1发布。
  * @param event 待发布事件，不可为NULL。
- * @param gps 有效GNSS结果；可为NULL。
+ * @param gps 有效GNSS结果；可为NULL。is_fixed时loc输出[lat,lon,sat]；
+ *            否则loc输出"Err0..3"（Err0启动失败/Err1超时/Err2无效/Err3停止失败）。
  * @param lbs GNSS失败时使用的LBS结果；可为NULL。
  * @param year 年，例如2026。
  * @param mon 月1~12。

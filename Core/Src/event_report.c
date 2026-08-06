@@ -22,12 +22,13 @@
 /* ========================== 私有宏 ========================== */
 
 #define NET_FAIL_HARD_RESET_THRESHOLD  3
-#define IMU_CAPTURE_TIME_MS    3000U
+#define IMU_CAPTURE_TIME_MS    3000U /* 3秒采样窗口，期间可并行开机4G模组 */
 #define IMU_SAMPLE_PERIOD_MS   10U
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
-#define NETWORK_BUDGET_MS      20000U
+#define NETWORK_BUDGET_MS      20000U /* 20秒网络握手预算，含AT、附着、信号、定位、MQTT */
+#define GNSS_FIX_TIMEOUT_MS    5000U /* 单次定位最长等待5秒；底层驱动不内置该策略。 */
 #define EVENT_COOLDOWN_SEC      30U
 #define REPORT_STAGE_IDLE        0U
 #define REPORT_STAGE_CAPTURE     1U
@@ -136,6 +137,23 @@ static int16_t Tilt_From_Accel_Cdeg(const float acc_mg[3])
   return Clamp_Int16(acosf(reference_component) * 5729.578f);
 }
 
+/**
+ * @brief 从加速度计计算pitch/roll（传感器体坐标系欧拉角）。
+ * @param acc_mg 三轴加速度，单位mg。
+ * @param pitch_cdeg 输出pitch，绕Y轴旋转，单位0.01°。
+ * @param roll_cdeg  输出roll，绕X轴旋转，单位0.01°。
+ * @details pitch=atan2(-ax,√(ay²+az²))，roll=atan2(ay,az)，静止时即重力相对体轴的角度。
+ */
+static void Accel_To_Pitch_Roll_Cdeg(const float acc_mg[3],
+                                     int16_t *pitch_cdeg, int16_t *roll_cdeg)
+{
+  float norm_xy = sqrtf(acc_mg[1] * acc_mg[1] + acc_mg[2] * acc_mg[2]);
+  float pitch_rad = atan2f(-acc_mg[0], norm_xy);
+  float roll_rad  = atan2f(acc_mg[1], acc_mg[2]);
+  *pitch_cdeg = Clamp_Int16(pitch_rad * 5729.578f);
+  *roll_cdeg  = Clamp_Int16(roll_rad * 5729.578f);
+}
+
 /* ========================== 公共函数 ========================== */
 
 /**
@@ -178,6 +196,9 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
   uint8_t matready_seen = 0U;
   uint8_t first_sample = 1U;
   uint16_t tilt_over_samples = 0U;
+  int16_t pitch_start_cdeg = 0, pitch_final_cdeg = 0; /**< pitch开始/最终角，本地追踪。 */
+  int16_t roll_start_cdeg = 0, roll_final_cdeg = 0;   /**< roll开始/最终角，本地追踪。 */
+  float yaw_accum_cdeg = 0.0f;                        /**< yaw净旋转角累积，厘度。 */
 
   if (event == NULL) return 0U;
   (void)LSM6DS_Set_Active_Mode();
@@ -206,14 +227,17 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
       float gyro[3] = {0};
       if (LSM6DS_Read_Storage(acc, gyro)) {
         int16_t tilt = Tilt_From_Accel_Cdeg(acc);
+        int16_t pitch_cdeg, roll_cdeg;
         float norm = sqrtf(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
+        Accel_To_Pitch_Roll_Cdeg(acc, &pitch_cdeg, &roll_cdeg);
         if (first_sample) {
-          event->tilt_start_cdeg = tilt;
-          event->tilt_peak_cdeg = tilt;
+          pitch_start_cdeg = pitch_cdeg;
+          roll_start_cdeg = roll_cdeg;
           first_sample = 0U;
         }
-        event->tilt_final_cdeg = tilt;
-        if (tilt > event->tilt_peak_cdeg) event->tilt_peak_cdeg = tilt;
+        pitch_final_cdeg = pitch_cdeg;
+        roll_final_cdeg = roll_cdeg;
+        /* tilt仍用于事件分类：连续超阈值500 ms确认倾倒，但不随事件存储。 */
         if (tilt >= (int16_t)(g_cfg.tilt_deg * 100U)) {
           if (tilt_over_samples < TILT_CONFIRM_SAMPLES) tilt_over_samples++;
           if (tilt_over_samples >= TILT_CONFIRM_SAMPLES)
@@ -222,6 +246,12 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
           tilt_over_samples = 0U;
         }
         if (norm > event->acc_norm_peak_mg) event->acc_norm_peak_mg = (uint16_t)norm;
+        /* yaw: 角速度投影到重力轴(单位矢量acc/|acc|)后积分，得到绕竖直轴的净旋转角。 */
+        if (norm > 100.0f) {
+          float yaw_rate_dps = (gyro[0] * acc[0] + gyro[1] * acc[1] +
+                                gyro[2] * acc[2]) / norm;
+          yaw_accum_cdeg += yaw_rate_dps * (IMU_SAMPLE_PERIOD_MS / 1000.0f) * 100.0f;
+        }
         for (uint8_t axis = 0U; axis < 3U; axis++) {
           float abs_acc = fabsf(acc[axis]);
           float abs_gyro = fabsf(gyro[axis]);
@@ -242,12 +272,42 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
   }
   if (pulse_active) ML307C_End_PowerOn_Pulse();
 
+  /* 三轴变换角[pitch, roll, yaw]：pitch/roll为最终-开始，yaw为陀螺积分净变化。 */
+  event->tilt_change_cdeg[0] = Clamp_Int16((float)((int32_t)pitch_final_cdeg -
+                                                   pitch_start_cdeg));
+  event->tilt_change_cdeg[1] = Clamp_Int16((float)((int32_t)roll_final_cdeg -
+                                                   roll_start_cdeg));
+  event->tilt_change_cdeg[2] = Clamp_Int16(yaw_accum_cdeg);
+
+  /* Active capture masks WU/6D on INT1.  Re-arm immediately after the sample
+   * window instead of leaving the wake path disabled throughout network,
+   * GNSS, MQTT and modem shutdown, which can take tens of seconds.  Any new
+   * IMU edge is latched by EXTI and consumed by Enter_Stop1_Mode afterwards. */
+  g_imu_ok = LSM6DS_Set_Sleep_Mode();
+
   if (!start_modem) return 0U;
 
   /* MATREADY is preferred, but an AT probe is the compatibility fallback. */
   start = HAL_GetTick();
   do {
     if (ML307C_Send_CMD("AT", "OK", matready_seen ? 1000U : 500U) == 1) return 1U;
+    HAL_IWDG_Refresh(&hiwdg);
+    Delay_With_Service(100U);
+  } while ((HAL_GetTick() - start) < 5000U);
+  return 0U;
+}
+
+/** @brief Start the modem only after an IMU event has passed confirmation. */
+static uint8_t Start_Modem_After_Event_Validation(void)
+{
+  uint32_t start;
+
+  if (!ML307C_Is_Powered()) Turn_On_ML307C();
+  else ML307C_Clear_Buffer();
+
+  start = HAL_GetTick();
+  do {
+    if (ML307C_Send_CMD("AT", "OK", 500U) == 1) return 1U;
     HAL_IWDG_Refresh(&hiwdg);
     Delay_With_Service(100U);
   } while ((HAL_GetTick() - start) < 5000U);
@@ -279,6 +339,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint16_t voltage_mv = (voltage > 0.0f) ? (uint16_t)(voltage * 1000.0f + 0.5f) : 0U;
   uint8_t allow_modem = Volt_Fuse_Check(voltage);
   uint8_t store_current = (!manual && !rtc_flag && (wu_flag || d6d_flag));
+  uint8_t defer_modem = store_current;
   uint8_t current_stored = 0U;
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
@@ -306,7 +367,11 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   else if (rtc_flag) event.wake_reason = EVENT_WAKE_RTC;
   else event.wake_reason = EVENT_WAKE_MANUAL;
 
-  modem_ready = Capture_Event_And_Start_Modem(&event, allow_modem);
+  /* RTC/manual reports may overlap modem boot with capture.  IMU reports are
+   * confirmed first so a 6D false wake or cooldown duplicate never flashes
+   * the modem without publishing anything. */
+  modem_ready = Capture_Event_And_Start_Modem(
+      &event, (uint8_t)(allow_modem && !defer_modem));
   if (event.sample_count == 0U) event.fail_reason = EVENT_FAIL_INTERNAL;
   /* If PB1 proved an IMU event but the latched source bits disappeared before
    * they were read, classify it from the confirmed physical result. */
@@ -369,6 +434,11 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     goto report_cleanup;
   }
 
+  if (defer_modem) {
+    g_last_report_stage = REPORT_STAGE_MODEM_READY;
+    modem_ready = Start_Modem_After_Event_Validation();
+  }
+
   if (!modem_ready) {
     g_last_report_stage = REPORT_STAGE_MODEM_READY;
     event.fail_reason = EVENT_FAIL_MODEM_READY;
@@ -426,11 +496,18 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   mqtt_connected = 1U;
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
-  (void)ML307C_GPS_Start();
-  Delay_With_Service(2000U);
-  if (ML307C_Send_CMD("AT+CGNSINF", "+CGNSINF:", 3000) == 1)
-    (void)ML307C_GPS_Parse(ML307C_Get_RxBuffer(), &gps);
+  if (ML307C_GPS_Start()) {
+    if (!ML307C_GPS_Wait_Fix(&gps, GNSS_FIX_TIMEOUT_MS)) {
+      /* `AT+MGNSS=2`只会在成功后自动关闭；超时必须主动停止搜星。 */
+      if (!ML307C_GPS_Stop()) gps.err_code = ML307C_LOC_ERR_STOP;
+      gps.is_fixed = 0;
+    }
+  } else {
+    gps.err_code = ML307C_LOC_ERR_START;
+  }
+#if 0 /* LBS兜底：GPS失败时改用基站定位；当前GPS-only，需要时把0改为1打开测试 */
   if (!gps.is_fixed) (void)ML307C_Get_LBS_Info(&lbs);
+#endif
 
   g_last_report_stage = REPORT_STAGE_PUBLISH;
   snprintf(topic, sizeof(topic), "device/%s/data", ML307C_Get_IMEI_Str());

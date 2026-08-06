@@ -29,7 +29,7 @@ typedef enum {
     EVENT_FAIL_NETWORK,        /**< 蜂窝网络注册或附着失败。 */
     EVENT_FAIL_MQTT_CONNECT,   /**< MQTT连接失败。 */
     EVENT_FAIL_MQTT_PUBACK,    /**< QoS 1发布未收到PUBACK。 */
-    EVENT_FAIL_GNSS,           /**< GNSS定位失败；可能继续使用LBS。 */
+    EVENT_FAIL_GNSS,           /**< GNSS定位失败。 */
     EVENT_FAIL_INTERNAL        /**< 采样、存储等内部错误。 */
 } EventFailReason_t;
 
@@ -52,9 +52,7 @@ typedef struct {
     uint32_t timestamp;         /**< Unix时间戳；RTC无效时可为0。 */
     uint16_t voltage_mv;        /**< 事件发生时的电池电压，单位mV。 */
     uint16_t acc_norm_peak_mg;  /**< 采样窗口内最大加速度模长，单位mg。 */
-    int16_t  tilt_start_cdeg;   /**< 采样开始倾角，单位0.01°。 */
-    int16_t  tilt_final_cdeg;   /**< 采样结束倾角，单位0.01°。 */
-    int16_t  tilt_peak_cdeg;    /**< 采样窗口最大倾角，单位0.01°。 */
+    int16_t  tilt_change_cdeg[3]; /**< 三轴变换角[pitch, roll, yaw]，单位0.01°，带符号。 */
     int16_t  acc_final_mg[3];   /**< 结束时X/Y/Z加速度，单位mg。 */
     int16_t  acc_peak_mg[3];    /**< X/Y/Z绝对峰值加速度，单位mg。 */
     int16_t  gyro_final_dps[3]; /**< 结束时X/Y/Z角速度，单位dps。 */
@@ -66,7 +64,6 @@ typedef struct {
     uint8_t  fail_reason;       /**< EventFailReason_t。 */
     uint8_t  reset_reason;      /**< STM32复位原因编码。 */
     uint8_t  retry_count;       /**< 已进行的网络重传次数。 */
-    uint16_t reserved;          /**< 保留字段，保证布局稳定，当前写0。 */
 } EventRecord_t;
 
 /**

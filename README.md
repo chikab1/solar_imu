@@ -1,8 +1,8 @@
 # Solar IMU 路牌倾倒监测终端
 
-版本：`7.21`  ·  日期：`2026-07-21`
+版本：`7.21`  ·  日期：`2026-08-04`
 
-本项目是一套面向室外路牌、道路附属设施和太阳能设备的低功耗倾倒/冲击监测固件。STM32G031 负责低功耗状态机和数据采集，LSM6DS3TR-C 负责 Wake-Up 与 6D 姿态唤醒，ML307C-GC-CN 负责 4G、GNSS/LBS 和 MQTT 上报。
+本项目是一套面向室外路牌、道路附属设施和太阳能设备的低功耗倾倒/冲击监测固件。STM32G031 负责低功耗状态机和数据采集，LSM6DS3TR-C 负责 Wake-Up 与 6D 姿态唤醒，ML307C-GC-CN 负责 4G、GNSS 和 MQTT 上报。
 
 当前版本已经完成实机验证：
 
@@ -21,7 +21,7 @@
 | 模块 | 型号/接口 | 作用 |
 |---|---|---|
 | MCU | STM32G031，64 KB Flash，8 KB RAM | 主状态机、低功耗、ADC、RTC、事件存储 |
-| 4G/GNSS | ML307C-GC-CN，USART1 115200 bit/s | 蜂窝联网、MQTT、网络校时、GNSS/LBS |
+| 4G/GNSS | ML307C-GC-CN，USART1 115200 bit/s | 蜂窝联网、MQTT、网络校时、GNSS |
 | IMU | LSM6DS3TR-C，I2C2 | 加速度、角速度、Wake-Up、6D姿态检测 |
 | 维护串口 | USART2，PA2/PA3，115200-8-N-1 | 配置、诊断、队列读取、人工上报 |
 | IMU中断 | PB1 / EXTI0_1 | LSM6DS3TR-C INT1，上升沿唤醒 |
@@ -129,7 +129,7 @@ flowchart TD
   "v": 3971,
   "w": 2,
   "fl": 3,
-  "tilt": [6317, 6577, 6940],
+  "tilt": {"p": 138, "r": 14, "y": 25},
   "acc": {
     "f": [-70, 917, 413],
     "p": [130, 969, 471],
@@ -142,7 +142,7 @@ flowchart TD
   "sn": 300,
   "rst": 6,
   "r": 0,
-  "lbs": [460, 0, 22549, 201822278],
+  "loc": [3105123, 12145678, 9],
   "time": "2026-07-21T05:26:41",
   "err": 0
 }
@@ -155,9 +155,9 @@ flowchart TD
 | `id` | 事件ID；QoS 1重复消息以此字段去重 |
 | `ts` | Unix时间戳 |
 | `v` | 电池电压，mV |
-| `w` | 唤醒原因：0未知、1 Wake-Up、2 6D、3两者、4 RTC、5人工/开机 |
+| `w` | 唤醒原因：0未知、1 加速度Wake-Up、2 6D倾角、3两者、4 RTC、5人工/开机 |
 | `fl` | 事件位：`0x01`时间有效、`0x02`倾斜、`0x04`冲击、`0x08`恢复 |
-| `tilt` | `[开始角度, 最终角度, 峰值角度]`，单位0.01° |
+| `tilt` | 三轴变换角`{p,r,y}`=pitch绕Y轴、roll绕X轴、yaw绕重力轴，单位0.01°，带符号 |
 | `acc.f` | 最终三轴加速度，mg |
 | `acc.p` | 三轴绝对峰值加速度，mg |
 | `acc.n` | 最大加速度模长，mg |
@@ -166,11 +166,13 @@ flowchart TD
 | `sn` | 采样数量 |
 | `rst` | STM32复位原因 |
 | `r` | 当前事件重试次数 |
-| `gps` | `[纬度×10000, 经度×10000, 卫星数]`，定位成功时出现 |
-| `lbs` | `[MCC, MNC, TAC, Cell ID]`，GNSS失败时使用 |
-| `loc` | GPS和LBS均失败时为`null` |
-| `time` | RTC时间字符串 |
+| `loc` | 定位字段：成功为`[纬度×10000, 经度×10000, 卫星数]`；失败为`"Err0".."Err3"`字符串，Err0=启动命令失败、Err1=等待定位超时、Err2=收到+ MGNSSLOC但数据无效、Err3=定位失败后关闭GNSS失败；未尝试定位时为`null` |
+| `time` | RTC本地时间字符串；联网后由ML307C `AT+CCLK`校时，并按时区后缀把UTC转换为本地时间后写入RTC |
 | `err` | 失败原因：0无、1低压、2模块未就绪、3 SIM、4网络、5 MQTT连接、6 PUBACK、7 GNSS、8内部错误 |
+
+`tilt`为3秒采样窗口内三轴变换角（单位0.01°，带符号）：`p`=pitch绕Y轴、`r`=roll绕X轴（均由加速度`atan2`计算，变换角=最终-开始），`y`=yaw绕重力轴的角速度积分净变化。倾斜判定仍由固件内部按`tilt_deg`阈值连续500 ms确认，事件只上报三轴变换角，不随事件存储开始/最终角度。
+
+`time`中的本地时间由固件解析`AT+CCLK`的时区后缀（`+zz`）得到：3GPP标准为四分之一小时（如`+32`=UTC+8），部分固件为小时（如`+08`），两者均被支持；RTC存储的是本地时间，`ts`仍是UTC Unix时间戳。
 
 MQTTX显示的订阅QoS可能为0，但设备侧`AT+MQTTPUB`使用QoS 1并等待`+MQTTURC: "puback"`。
 
@@ -204,7 +206,7 @@ MQTTX显示的订阅QoS可能为0，但设备侧`AT+MQTTPUB`使用QoS 1并等待
 
 串口参数：`115200 bit/s，8数据位，无校验，1停止位，无流控`。串口助手必须使用十六进制发送和十六进制显示。
 
-完整协议细节也见[`docs/service_protocol.md`](docs/service_protocol.md)。
+中文发送与测试手册见[`docs/USART2串口通信指令手册.md`](docs/USART2串口通信指令手册.md)，协议字段定义也见[`docs/service_protocol.md`](docs/service_protocol.md)。
 
 ### 5.1 Stop1唤醒握手
 
@@ -598,7 +600,7 @@ arm-none-eabi-objcopy -O binary build/Debug/solar_imu.elf build/Debug/solar_imu.
 |---|---|
 | `Core/Src/main.c` | 系统状态机、Stop1、RTC、事件确认、上报流程 |
 | `Core/Src/lsm6ds.c` | LSM6DS3TR-C采样、Wake-Up、6D、INT1锁存处理 |
-| `Core/Src/at_ml307c.c` | ML307C开关机、AT、注册、MQTT、GNSS/LBS |
+| `Core/Src/at_ml307c.c` | ML307C开关机、AT、注册、MQTT、GNSS |
 | `Core/Src/uart_driver.c` | 环形缓冲/DMA UART驱动 |
 | `Core/Src/service_protocol.c` | USART2二进制协议、CRC、半包/粘包/队列 |
 | `Core/Src/event_store.c` | 最多3条Flash事件队列 |
@@ -635,6 +637,10 @@ main while(1)
    ├─ IMU_Drain_INT1_Latch()
    └─ RTC分段布防/WFI/串口引脚恢复
 ~~~
+
+### 8.3 项目需求与进度
+
+项目需求、进度和长期决策统一记录在 docs/project 目录。后续功能按REQ需求文件完成澄清、实施和验收，当前总进度见 docs/project/PROJECT_STATUS.md。
 
 ## 9. 量产前必须完成的事项
 
