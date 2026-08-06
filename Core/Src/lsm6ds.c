@@ -151,6 +151,7 @@ static int32_t lsm6ds3tr_c_hal_read(void *handle, uint8_t reg,
 uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
 {
     uint8_t chip_id = 0;
+    uint8_t reset_pending = 1U;
 
     s_sleep_mode_ready = 0U;
 
@@ -168,16 +169,36 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
     }
 
     /* 软复位 */
-    lsm6ds3tr_c_reset_set(&imu_ctx, PROPERTY_ENABLE);
-    HAL_Delay(50);
+    /* Do not configure the device while SW_RESET is still active.  A fixed
+     * delay hid I2C/reset failures and allowed the following writes to be
+     * silently lost, leaving INT1 unarmed. */
+    if (lsm6ds3tr_c_reset_set(&imu_ctx, PROPERTY_ENABLE) != 0) return 0;
+    for (uint8_t attempt = 0U; attempt < 50U; attempt++) {
+        HAL_Delay(2U);
+        if (lsm6ds3tr_c_reset_get(&imu_ctx, &reset_pending) != 0) return 0;
+        if (reset_pending == 0U) break;
+    }
+    if (reset_pending != 0U) return 0;
+
+    if (lsm6ds3tr_c_block_data_update_set(&imu_ctx, PROPERTY_ENABLE) != 0 ||
+        lsm6ds3tr_c_auto_increment_set(&imu_ctx, PROPERTY_ENABLE) != 0) {
+        return 0;
+    }
 
     /* 加速度计：52Hz, ±2g */
-    lsm6ds3tr_c_xl_data_rate_set(&imu_ctx, LSM6DS3TR_C_XL_ODR_52Hz);
-    lsm6ds3tr_c_xl_full_scale_set(&imu_ctx, LSM6DS3TR_C_2g);
+    if (lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_XL_ODR_52Hz) != 0 ||
+        lsm6ds3tr_c_xl_full_scale_set(&imu_ctx, LSM6DS3TR_C_2g) != 0) {
+        return 0;
+    }
 
     /* 陀螺仪：52Hz, ±2000dps */
-    lsm6ds3tr_c_gy_data_rate_set(&imu_ctx, LSM6DS3TR_C_GY_ODR_52Hz);
-    lsm6ds3tr_c_gy_full_scale_set(&imu_ctx, LSM6DS3TR_C_2000dps);
+    if (lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
+                                     LSM6DS3TR_C_GY_ODR_52Hz) != 0 ||
+        lsm6ds3tr_c_gy_full_scale_set(&imu_ctx,
+                                      LSM6DS3TR_C_2000dps) != 0) {
+        return 0;
+    }
 
     return 1;
 }
@@ -380,6 +401,33 @@ uint8_t LSM6DS_Set_Active_Mode(void)
     return 1;
 }
 
+/* Verify the complete wake path instead of trusting only the software cache.
+ * Expected sleep registers are CTRL1_XL=52 Hz/2 g, gyro ODR off,
+ * TAP_CFG.INTERRUPTS_ENABLE+LIR set, and WU+6D routed to INT1. */
+static uint8_t LSM6DS_Sleep_Config_Is_Valid(void)
+{
+    uint8_t ctrl1_xl;
+    uint8_t ctrl2_g;
+    uint8_t tap_cfg;
+    uint8_t md1_cfg;
+
+    if (lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_CTRL1_XL,
+                             &ctrl1_xl, 1) != 0 ||
+        lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_CTRL2_G,
+                             &ctrl2_g, 1) != 0 ||
+        lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
+                             &tap_cfg, 1) != 0 ||
+        lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_MD1_CFG,
+                             &md1_cfg, 1) != 0) {
+        return 0U;
+    }
+
+    return (uint8_t)(((ctrl1_xl & 0xFCU) == 0x30U) &&
+                     ((ctrl2_g & 0xF0U) == 0x00U) &&
+                     ((tap_cfg & 0x81U) == 0x81U) &&
+                     ((md1_cfg & 0x24U) == 0x24U));
+}
+
 /**
  * @brief 切换到Stop1布防模式：52 Hz加速度计、陀螺仪关闭、WU和6D路由INT1。
  * @return 1布防完成或此前已布防，0 I2C配置失败。
@@ -390,7 +438,8 @@ uint8_t LSM6DS_Set_Sleep_Mode(void)
     lsm6ds3tr_c_int1_route_t int1_route = {0};
 
     /* Do not clear an event that arrived while already armed for Stop1. */
-    if (s_sleep_mode_ready) return 1U;
+    if (s_sleep_mode_ready && LSM6DS_Sleep_Config_Is_Valid()) return 1U;
+    s_sleep_mode_ready = 0U;
 
     /* Keep the proven 52 Hz accelerometer operating point for WU/6D.  The
      * gyroscope is independent of both embedded functions and can be stopped
@@ -415,6 +464,7 @@ uint8_t LSM6DS_Set_Sleep_Mode(void)
     int1_route.int1_6d = 1;
     int1_route.int1_tilt = 0;
     if (lsm6ds3tr_c_pin_int1_route_set(&imu_ctx, int1_route) != 0) return 0;
+    if (!LSM6DS_Sleep_Config_Is_Valid()) return 0;
     s_sleep_mode_ready = 1U;
     return 1;
 }

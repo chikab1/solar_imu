@@ -93,11 +93,9 @@ void SystemClock_Config(void);
 /* USER CODE END 0 */
 
 /**
- * @brief 固件入口：完成一次外设/业务模块初始化，然后永久运行低功耗业务循环。
- * @return 嵌入式目标不会返回。
- * @details 上电会安排一次启动上报；之后串口会话空闲60秒关闭，非维护状态进入
- * Stop1。IMU/RTC唤醒把来源保存到g_report_*，下一轮执行Run_Event_Report()。
- */
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
 
@@ -494,13 +492,14 @@ int main(void)
             }
             HAL_IWDG_Refresh(&hiwdg);
 
-            ML307C_GPS_Start();
-            HAL_Delay(2000);
             ML307C_GPS_Data_t gps = {0};
             ML307C_LBS_Data_t lbs = {0};
-            {
-              ML307C_Send_CMD("AT+CGNSINF", "+CGNSINF:", 3000);
-              ML307C_GPS_Parse(ML307C_Get_RxBuffer(), &gps);
+            if (ML307C_GPS_Start()) {
+              if (!ML307C_GPS_Wait_Fix(&gps, 5000U)) {
+                /* 单次定位仅成功后自动关闭；失败/超时必须显式停止。 */
+                (void)ML307C_GPS_Stop();
+                gps.is_fixed = 0;
+              }
             }
 
             if (!gps.is_fixed) {

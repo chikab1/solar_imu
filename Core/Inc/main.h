@@ -73,7 +73,6 @@ typedef enum { CMD_NONE = 0, CMD_ON, CMD_OFF, CMD_SLEEP, CMD_VBAT, CMD_MQTT, CMD
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
-/** @brief HAL/CubeMX初始化遇到不可恢复错误时关闭中断并停机。 */
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */

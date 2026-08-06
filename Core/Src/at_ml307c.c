@@ -17,6 +17,7 @@
 #include "main.h"
 #include "iwdg.h"
 #include "uart_driver.h"
+#include "rtc_utils.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -629,153 +630,299 @@ void ML307C_Hard_Reset(void)
  * ================================================================ */
 
 /**
-  * @brief  启动 GPS 定位
-  * @retval 1: 启动成功  0: 启动失败
-  * @note   ML307C 内置 GNSS, AT+CGNSPWR=1 开启, AT+CGNSINF 查询定位
+  * @brief 配置并启动GNSS单次定位。
+  * @retval 1: 两条命令均确认成功  0: 配置或启动失败。
+  * @note 必须先开启`+MGNSSLOC:`上报，再进入`AT+MGNSS=2`单次定位模式。
   */
 int ML307C_GPS_Start(void)
 {
-    if (ML307C_Send_CMD("AT+CGNSPWR=1", "OK", 3000) != 1) return 0;
+    if (ML307C_Send_CMD("AT+MGNSSLOC=1", "OK", 3000) != 1) return 0;
+    if (ML307C_Send_CMD("AT+MGNSS=2", "OK", 3000) != 1) return 0;
+    return 1;
+}
+
+/** @brief 主动关闭尚未完成单次定位的GNSS。 */
+int ML307C_GPS_Stop(void)
+{
+    return (ML307C_Send_CMD("AT+MGNSS=0", "OK", 3000) == 1) ? 1 : 0;
+}
+
+/**
+  * @brief NMEA ddmm.mmmm/dddmm.mmmm 字段转十进制度，纯整数运算避免 atof。
+  * @param s NMEA 字段字符串，如 "3027.4123" 或 "12012.3456"。
+  * @return 十进制度（浮点），解析失败返回 0.0f。
+  * @note NMEA 纬度 ddmm.mmmm、经度 dddmm.mmmm，统一用 ddmm/100 取度、ddmm%100 取分。
+  */
+static float NMEA_DegMin_To_Deg(const char *s)
+{
+    if (s == NULL || *s == '\0') return 0.0f;
+
+    int32_t ddmm = 0;
+    uint8_t i;
+    for (i = 0; s[i] >= '0' && s[i] <= '9'; i++) {
+        ddmm = ddmm * 10 + (int32_t)(s[i] - '0');
+    }
+
+    int32_t deg = ddmm / 100;
+    int32_t min_int = ddmm % 100;
+    int32_t min_frac = 0;
+    uint8_t frac_digits = 0;
+
+    if (s[i] == '.') {
+        i++;
+        for (; s[i] >= '0' && s[i] <= '9' && frac_digits < 4; i++) {
+            min_frac = min_frac * 10 + (int32_t)(s[i] - '0');
+            frac_digits++;
+        }
+    }
+    while (frac_digits < 4) { min_frac *= 10; frac_digits++; }
+
+    return (float)deg + ((float)min_int + (float)min_frac / 10000.0f) / 60.0f;
+}
+
+/** @brief 验证并解析只含十进制数字的整数范围。 */
+static int ML307C_GPS_Parse_UInt(const char *begin, const char *end, int *value)
+{
+    int result = 0;
+
+    if (begin == NULL || end == NULL || value == NULL || begin >= end) return 0;
+    while (begin < end) {
+        if (*begin < '0' || *begin > '9' || result > 1000000) return 0;
+        result = result * 10 + (int)(*begin - '0');
+        begin++;
+    }
+    *value = result;
     return 1;
 }
 
 /**
-  * @brief  解析 CGNSINF 定位数据 (纯整数解析, 杜绝 sscanf(%f))
-  * @param  uart_rx_buf: 包含 +CGNSINF 响应的缓冲区
-  * @param  gps_data:    输出 GPS 数据结构体
-  * @retval 1: 定位有效  0: 定位无效或解析失败
-  * @note   +CGNSINF 响应格式:
-  *         +CGNSINF: <run>,<fix>,<utc>,<lat>,<lon>,<alt>,<speed>,<cog>,<fixmode>,<reserved>,<HDOP>,<PDOP>,<VDOP>,<sat>,<sat_in_use>,...
-  *         例: +CGNSINF: 1,1,20260713120000.000,30.2741,120.0265,12.3,0.0,0.0,3,,1.2,,1.5,8,8
-  *         纯整数解析: 30.2741 → 302741 (×10000), 避免浮点库
+ * @brief 解析`+MGNSSLOC:`中的NMEA度分坐标字段和尾部半球标识。
+ * @param degree_digits 纬度为2，经度为3。
+ */
+static int ML307C_GPS_Parse_LOC_Coord(const char *field, uint16_t len,
+                                      uint8_t degree_digits, float *value)
+{
+    char coord[16];
+    uint16_t numeric_len;
+    uint8_t i;
+    int degree = 0;
+    int minute = 0;
+    char hemisphere;
+    float result;
+
+    if (field == NULL || value == NULL || len <= (uint16_t)(degree_digits + 2U)) return 0;
+    hemisphere = field[len - 1U];
+    if ((degree_digits == 2U && hemisphere != 'N' && hemisphere != 'S') ||
+        (degree_digits == 3U && hemisphere != 'E' && hemisphere != 'W')) return 0;
+
+    numeric_len = len - 1U;
+    if (numeric_len >= sizeof(coord) ||
+        numeric_len <= (uint16_t)(degree_digits + 2U)) return 0;
+    for (i = 0U; i < numeric_len; i++) {
+        if (i == (uint8_t)(degree_digits + 2U)) {
+            if (field[i] != '.') return 0;
+        } else if (field[i] < '0' || field[i] > '9') {
+            return 0;
+        }
+    }
+    if (numeric_len == (uint16_t)(degree_digits + 2U)) return 0;
+
+    for (i = 0U; i < degree_digits; i++) {
+        degree = degree * 10 + (int)(field[i] - '0');
+    }
+    minute = (int)(field[degree_digits] - '0') * 10 +
+             (int)(field[degree_digits + 1U] - '0');
+    if (minute >= 60 || degree > ((degree_digits == 2U) ? 90 : 180) ||
+        (degree == ((degree_digits == 2U) ? 90 : 180) && minute != 0)) return 0;
+
+    memcpy(coord, field, numeric_len);
+    coord[numeric_len] = '\0';
+    result = NMEA_DegMin_To_Deg(coord);
+    if (result > ((degree_digits == 2U) ? 90.0f : 180.0f)) return 0;
+    if (hemisphere == 'S' || hemisphere == 'W') result = -result;
+    *value = result;
+    return 1;
+}
+
+/**
+ * @brief 从一行完整`+MGNSSLOC:` URC解析定位结果。
+ * @note 字段顺序：time,lat,lon,hdop,alt,fix,...,date,nsat,...；fix仅2/3有效。
+ */
+static int ML307C_GPS_Parse_LOC(const char *response, ML307C_GPS_Data_t *gps_data)
+{
+    const char *fields[11];
+    const char *p;
+    const char *end;
+    uint16_t lengths[11];
+    uint8_t index;
+    int fix;
+    int satellites;
+    float latitude;
+    float longitude;
+
+    if (response == NULL || gps_data == NULL) return 0;
+    p = strstr(response, "+MGNSSLOC:");
+    if (p == NULL) return 0;
+    p += 10U;
+    while (*p == ' ' || *p == '\t') p++;
+
+    for (index = 0U; index < 11U; index++) {
+        fields[index] = p;
+        end = p;
+        while (*end != '\0' && *end != ',' && *end != '\r' && *end != '\n') end++;
+        lengths[index] = (uint16_t)(end - p);
+        if (index < 10U) {
+            if (*end != ',') return 0;
+            p = end + 1;
+        }
+    }
+
+    if (!ML307C_GPS_Parse_UInt(fields[5], fields[5] + lengths[5], &fix) ||
+        !ML307C_GPS_Parse_UInt(fields[10], fields[10] + lengths[10], &satellites) ||
+        (fix != 2 && fix != 3) || satellites < 0 || satellites > 99 ||
+        !ML307C_GPS_Parse_LOC_Coord(fields[1], lengths[1], 2U, &latitude) ||
+        !ML307C_GPS_Parse_LOC_Coord(fields[2], lengths[2], 3U, &longitude)) {
+        return 0;
+    }
+
+    gps_data->latitude = latitude;
+    gps_data->longitude = longitude;
+    gps_data->satellites = satellites;
+    gps_data->is_fixed = 1;
+    return 1;
+}
+
+/**
+ * @brief 保留末尾窗口，避免长时间等待时无关URC占满聚合缓冲。
+ * @note `+MGNSSLOC:`完整行远小于窗口；窗口同时保留可能被拆分的URC前缀。
+ */
+static void ML307C_GPS_Keep_Rx_Tail(void)
+{
+    const uint16_t keep_len = 128U;
+
+    if (s_rx_buf_len > keep_len) {
+        memmove(s_uart_rx_buf, s_uart_rx_buf + s_rx_buf_len - keep_len, keep_len);
+        s_rx_buf_len = keep_len;
+        s_uart_rx_buf[s_rx_buf_len] = '\0';
+    }
+}
+
+/**
+ * @brief 纯监听`+MGNSSLOC:`异步上报，等待GNSS单次定位。
+ * @note 绝不清空UART RX或发送AT命令，避免丢失`AT+MGNSS=2`之后的早到URC。
+ */
+int ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms)
+{
+    uint32_t start_tick;
+
+    if (gps_data == NULL || timeout_ms == 0U) return 0;
+    memset(gps_data, 0, sizeof(*gps_data));
+    gps_data->err_code = ML307C_LOC_ERR_UNKNOWN;
+    start_tick = HAL_GetTick();
+
+    while ((HAL_GetTick() - start_tick) < timeout_ms) {
+        char *loc;
+        char *line_end;
+        uint16_t avail;
+        uint16_t space;
+        uint16_t to_read;
+
+        HAL_IWDG_Refresh(&hiwdg);
+        ML307C_Background_Poll();
+
+        /* 不修改原始缓冲：解析函数以CR/LF作为该行结束标记。 */
+        loc = strstr((char *)s_uart_rx_buf, "+MGNSSLOC:");
+        while (loc != NULL) {
+            line_end = strpbrk(loc, "\r\n");
+            if (line_end == NULL) break;
+            if (ML307C_GPS_Parse_LOC(loc, gps_data)) {
+                return 1;
+            }
+            /* 收到完整的+MGNSSLOC行但解析无效：定位数据异常。 */
+            gps_data->err_code = ML307C_LOC_ERR_URC;
+            loc = strstr(line_end + 1, "+MGNSSLOC:");
+        }
+
+        /* 先压缩再读取，持续腾出空间并避免无关URC导致缓冲卡死。 */
+        if (s_rx_buf_len >= (ML307C_MAX_BUF_SIZE - 128U)) ML307C_GPS_Keep_Rx_Tail();
+        avail = UART_Available(&g_uart1_drv);
+        space = ML307C_MAX_BUF_SIZE - s_rx_buf_len - 1U;
+        to_read = (avail < space) ? avail : space;
+        if (to_read > 0U) {
+            s_rx_buf_len += UART_Read(&g_uart1_drv, s_uart_rx_buf + s_rx_buf_len, to_read);
+            s_uart_rx_buf[s_rx_buf_len] = '\0';
+        }
+
+        HAL_Delay(5U);
+    }
+
+    /* 超时退出：整个等待期间未收到任何有效定位URC。 */
+    if (gps_data->err_code == ML307C_LOC_ERR_UNKNOWN)
+        gps_data->err_code = ML307C_LOC_ERR_TIMEOUT;
+    return 0;
+}
+
+/**
+  * @brief  从 UART 缓冲区扫描并解析 NMEA $GNGGA 句，提取定位数据。
+  * @param  gps_data:    输出 GPS 数据结构体。
+  * @retval 1: 成功解析且 fix 有效  0: 未找到、fix 无效或字段解析失败。
+  * @note   $GNGGA 格式: $GNGGA,hhmmss.ss,llll.ll,a,yyyyy.yy,a,x,xx,x.x,x.x,M,x.x,M,,*xx
+  *         字段2=纬度(ddmm.mmmm), 3=N/S, 4=经度(dddmm.mmmm), 5=E/W, 6=fix(0=无效), 7=卫星数。
+  *         手动逐字段解析，不用 sscanf/strtok，避免浮点库和缓冲区破坏。
   */
 int ML307C_GPS_Parse(char *uart_rx_buf, ML307C_GPS_Data_t *gps_data)
 {
     if (uart_rx_buf == NULL || gps_data == NULL) return 0;
+    gps_data->err_code = ML307C_LOC_ERR_UNKNOWN;
 
-    char *p = strstr(uart_rx_buf, "+CGNSINF:");
-    if (p == NULL) return 0;
+    /* 从后往前找最后一个 $GNGGA（最新的定位数据） */
+    char *gga = NULL;
+    char *scan = uart_rx_buf;
+    while (1) {
+        char *next = strstr(scan, "$GNGGA,");
+        if (next == NULL) break;
+        gga = next;
+        scan = next + 1;
+    }
+    if (gga == NULL) return 0;
 
-    /* 跳过 "+CGNSINF: " 到数据区 */
-    p = strchr(p, ':');
-    if (p == NULL) return 0;
-    p++;
+    /* 截取本句到下一个 $ 或 \r\n */
+    char *end = strpbrk(gga + 1, "$\r\n");
+    char saved = 0;
+    if (end != NULL) { saved = *end; *end = '\0'; }
 
-    /* 解析字段: run,fix,utc,lat,lon,... */
-    int fix = 0;
-    char *field = p;
-    int field_idx = 0;
-
-    /* 手动逐字段解析, 不用 strtok (破坏原缓冲区) */
-    while (*field != '\0' && *field != '\r' && *field != '\n') {
-        char *comma = strchr(field, ',');
-        int field_len;
-
-        if (comma != NULL) {
-            field_len = (int)(comma - field);
-        } else {
-            field_len = (int)strlen(field);
-        }
-
-        /* 去掉尾部 \r\n */
-        while (field_len > 0 && (field[field_len-1] == '\r' || field[field_len-1] == '\n'))
-            field_len--;
-
-        switch (field_idx) {
-        case 0: /* run status - ignored */
-            break;
-        case 1: /* fix status */
-            if (field_len > 0) fix = (field[0] == '1') ? 1 : 0;
-            break;
-        case 3: /* latitude: "30.2741" → 302741 (×10000) */
-            if (field_len > 0 && fix) {
-                int deg = 0, frac = 0;
-                char *dot = memchr(field, '.', field_len);
-                if (dot != NULL && dot < field + field_len) {
-                    int deg_len = (int)(dot - field);
-                    int frac_len = (int)(field_len - deg_len - 1);
-                    if (frac_len > 4) frac_len = 4;
-                    char tmp[16];
-                    if (deg_len > 0 && deg_len < 8) {
-                        memcpy(tmp, field, deg_len);
-                        tmp[deg_len] = '\0';
-                        deg = atoi(tmp);
-                    }
-                    if (frac_len > 0) {
-                        memcpy(tmp, dot + 1, frac_len);
-                        while (frac_len < 4) { tmp[frac_len++] = '0'; }
-                        tmp[frac_len] = '\0';
-                        frac = atoi(tmp);
-                    }
-                    gps_data->latitude = (float)deg + (float)frac / 10000.0f;
-                } else {
-                    char tmp[16];
-                    int cp = field_len < 8 ? field_len : 8;
-                    memcpy(tmp, field, cp);
-                    tmp[cp] = '\0';
-                    gps_data->latitude = (float)atoi(tmp);
-                }
-            }
-            break;
-        case 4: /* longitude: "120.0265" → 1200265 (×10000) */
-            if (field_len > 0 && fix) {
-                int deg = 0, frac = 0;
-                char *dot = memchr(field, '.', field_len);
-                if (dot != NULL && dot < field + field_len) {
-                    int deg_len = (int)(dot - field);
-                    int frac_len = (int)(field_len - deg_len - 1);
-                    if (frac_len > 4) frac_len = 4;
-                    char tmp[16];
-                    if (deg_len > 0 && deg_len < 8) {
-                        memcpy(tmp, field, deg_len);
-                        tmp[deg_len] = '\0';
-                        deg = atoi(tmp);
-                    }
-                    if (frac_len > 0) {
-                        memcpy(tmp, dot + 1, frac_len);
-                        while (frac_len < 4) { tmp[frac_len++] = '0'; }
-                        tmp[frac_len] = '\0';
-                        frac = atoi(tmp);
-                    }
-                    gps_data->longitude = (float)deg + (float)frac / 10000.0f;
-                } else {
-                    char tmp[16];
-                    int cp = field_len < 8 ? field_len : 8;
-                    memcpy(tmp, field, cp);
-                    tmp[cp] = '\0';
-                    gps_data->longitude = (float)atoi(tmp);
-                }
-            }
-            break;
-        case 13: /* number of satellites */
-            if (field_len > 0 && fix) {
-                char tmp[8];
-                int cp = field_len < 4 ? field_len : 4;
-                memcpy(tmp, field, cp);
-                tmp[cp] = '\0';
-                gps_data->satellites = atoi(tmp);
-            }
-            break;
-        }
-
-        field_idx++;
-        if (field_idx > 13) break;
-
-        if (comma != NULL) {
-            field = comma + 1;
-        } else {
-            break;
-        }
+    /* 逗号分割字段 */
+    char *fields[16] = {0};
+    uint8_t fc = 0;
+    fields[fc++] = gga;
+    for (char *c = gga; *c && fc < 16; c++) {
+        if (*c == ',') { *c = '\0'; fields[fc++] = c + 1; }
     }
 
-    gps_data->is_fixed = fix;
-    if (!fix) {
-        gps_data->latitude = 0.0f;
-        gps_data->longitude = 0.0f;
-        gps_data->satellites = 0;
+    int fix = 0, sat = 0;
+    float lat = 0.0f, lon = 0.0f;
+
+    if (fc > 6) {
+        fix = atoi(fields[6]);  /* 字段6: fix quality, 0=无效 */
+    }
+    if (fc > 7) {
+        sat = atoi(fields[7]);  /* 字段7: 卫星数 */
+    }
+    if (fix > 0 && fc > 5) {
+        lat = NMEA_DegMin_To_Deg(fields[2]);  /* 纬度: ddmm.mmmm */
+        if (fields[3][0] == 'S') lat = -lat;
+        lon = NMEA_DegMin_To_Deg(fields[4]);  /* 经度: dddmm.mmmm */
+        if (fields[5][0] == 'W') lon = -lon;
     }
 
-    return fix;
+    if (end != NULL) *end = saved;  /* 恢复原字符 */
+
+    gps_data->is_fixed   = (fix > 0) ? 1 : 0;
+    gps_data->satellites = sat;
+    gps_data->latitude   = lat;
+    gps_data->longitude  = lon;
+    if (!gps_data->is_fixed) gps_data->err_code = ML307C_LOC_ERR_TIMEOUT;
+    return gps_data->is_fixed;
 }
 
 /**
@@ -1061,14 +1208,14 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
 
     n = snprintf(json, sizeof(json),
         "{\"id\":%lu,\"ts\":%lu,\"v\":%u,\"w\":%u,\"fl\":%u,"
-        "\"tilt\":[%d,%d,%d],"
+        "\"tilt\":{\"p\":%d,\"r\":%d,\"y\":%d},"
         "\"acc\":{\"f\":[%d,%d,%d],\"p\":[%d,%d,%d],\"n\":%u},"
         "\"gyro\":{\"f\":[%d,%d,%d],\"p\":[%d,%d,%d]},"
         "\"sn\":%u,\"rst\":%u,\"r\":%u",
         (unsigned long)event->event_id, (unsigned long)event->timestamp,
         event->voltage_mv,
         event->wake_reason, event->flags,
-        event->tilt_start_cdeg, event->tilt_final_cdeg, event->tilt_peak_cdeg,
+        event->tilt_change_cdeg[0], event->tilt_change_cdeg[1], event->tilt_change_cdeg[2],
         event->acc_final_mg[0], event->acc_final_mg[1], event->acc_final_mg[2],
         event->acc_peak_mg[0], event->acc_peak_mg[1], event->acc_peak_mg[2],
         event->acc_norm_peak_mg,
@@ -1081,7 +1228,11 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
         int lat = (int)(gps->latitude * 10000.0f);
         int lon = (int)(gps->longitude * 10000.0f);
         n += snprintf(json + n, sizeof(json) - (size_t)n,
-                      ",\"gps\":[%d,%d,%d]", lat, lon, gps->satellites);
+                      ",\"loc\":[%d,%d,%d]", lat, lon, gps->satellites);
+    } else if (gps != NULL && gps->err_code >= ML307C_LOC_ERR_START) {
+        /* GNSS已尝试但失败：Err0=启动失败,Err1=超时,Err2=无效数据,Err3=停止失败。 */
+        n += snprintf(json + n, sizeof(json) - (size_t)n,
+                      ",\"loc\":\"Err%d\"", gps->err_code);
     } else if (lbs != NULL && lbs->valid) {
         n += snprintf(json + n, sizeof(json) - (size_t)n,
                       ",\"lbs\":[%d,%d,%d,%d]",
@@ -1100,10 +1251,53 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
     return ML307C_MQTT_PublishEx(topic, json, dup);
 }
 
+/** @brief 按公历返回某月天数（含闰年），month为1~12。 */
+static uint8_t Month_Days(uint16_t year, uint8_t month)
+{
+    static const uint8_t days[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    uint8_t d = days[month - 1U];
+    if (month == 2U && (year % 4U) == 0U &&
+        ((year % 100U) != 0U || (year % 400U) == 0U))
+        d = 29U;
+    return d;
+}
+
+/** @brief 给RTC时间结构加/减任意分钟（本地 = UTC + 时区偏移），自动跨日/月/年进位借位。 */
+static void RTC_Apply_TZ_Offset(RTC_TimeTypeDef *t, RTC_DateTypeDef *d, int32_t offset_min)
+{
+    int32_t total = (int32_t)t->Minutes + offset_min;
+    t->Minutes = (uint8_t)(((total % 60) + 60) % 60);
+    int32_t carry = (total - (int32_t)t->Minutes) / 60;
+
+    int32_t h = (int32_t)t->Hours + carry;
+    t->Hours = (uint8_t)(((h % 24) + 24) % 24);
+    int32_t day = (h - (int32_t)t->Hours) / 24;
+
+    int32_t y = 2000 + (int32_t)d->Year;
+    int32_t m = (int32_t)d->Month;
+    int32_t dd = (int32_t)d->Date + day;
+    while (dd < 1) {
+        m--;
+        if (m < 1) { m = 12; y--; }
+        dd += (int32_t)Month_Days((uint16_t)y, (uint8_t)m);
+    }
+    while (dd > (int32_t)Month_Days((uint16_t)y, (uint8_t)m)) {
+        dd -= (int32_t)Month_Days((uint16_t)y, (uint8_t)m);
+        m++;
+        if (m > 12) { m = 1; y++; }
+    }
+    d->Year  = (uint8_t)(y - 2000);
+    d->Month = (uint8_t)m;
+    d->Date  = (uint8_t)dd;
+}
+
 /**
- * @brief 查询运营商时间并写入STM32 RTC。
+ * @brief 查询运营商时间并写入STM32 RTC（存本地时间）。
  * @return 1时间字段合法且HAL写入完成，0 AT/解析失败。
- * @note 当前忽略CCLK时区后缀；RTC日期的星期字段固定填星期一。
+ * @note CCLK返回UTC时间+时区后缀("±zz")：3GPP标准为四分之一小时(如+32=UTC+8)，
+ *       部分厂商返回小时(如+08)。|zz|<=14按小时计，>14按四分之一小时计。
+ *       解析出的偏移存入g_rtc_tz_offset_min，并把UTC转成本地时间写入RTC，
+ *       RTC_Get_Context()换算时间戳时再减回。RTC日期的星期字段固定填星期一。
  */
 int ML307C_Sync_RTC(void)
 {
@@ -1136,6 +1330,21 @@ int ML307C_Sync_RTC(void)
         hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59)
         return 0;
 
+    /* 解析秒字段后的时区后缀，p当前指向秒字段首个数字。 */
+    int32_t tz_min = 0;
+    {
+        char *q = p;
+        while (*q >= '0' && *q <= '9') q++;
+        int sign = 1;
+        if (*q == '-' || *q == '+') {
+            if (*q == '-') sign = -1;
+            q++;
+            int zz = atoi(q);
+            tz_min = (zz > 14) ? sign * zz * 15 : sign * zz * 60;
+        }
+    }
+    g_rtc_tz_offset_min = (int16_t)tz_min;
+
     RTC_TimeTypeDef rtc_time = {0};
     RTC_DateTypeDef rtc_date = {0};
     rtc_date.Year    = (uint8_t)(yy >= 100 ? yy - 2000 : yy);
@@ -1147,6 +1356,9 @@ int ML307C_Sync_RTC(void)
     rtc_time.Seconds = (uint8_t)ss;
     rtc_time.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
     rtc_time.StoreOperation = RTC_STOREOPERATION_RESET;
+
+    /* UTC→本地，跨日/月/年进位由辅助函数处理。 */
+    RTC_Apply_TZ_Offset(&rtc_time, &rtc_date, tz_min);
 
     if (HAL_RTC_SetTime(&hrtc, &rtc_time, RTC_FORMAT_BIN) != HAL_OK)
         return 0;

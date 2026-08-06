@@ -148,7 +148,16 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   g.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &g);
 
-  (void)LSM6DS_Set_Sleep_Mode();
+  /* Re-arm and verify the actual sensor registers.  One full gatekeeper
+   * rewrite recovers a transient I2C error or a sensor brownout/reset instead
+   * of entering Stop1 with an inert INT1 line. */
+  if (!LSM6DS_Set_Sleep_Mode()) {
+    g_imu_ok = LSM6DS_Config_Gatekeeper(g_cfg.wu_mg,
+                                        (uint8_t)g_cfg.tilt_deg);
+    if (g_imu_ok) g_imu_ok = LSM6DS_Set_Sleep_Mode();
+  } else {
+    g_imu_ok = 1U;
+  }
   /* Preserve an event that arrived after the previous report but before WFI;
    * it is a real event, not merely a stale latch to discard. */
   (void)IMU_Drain_INT1_Latch(&pre_wu, &pre_6d);
