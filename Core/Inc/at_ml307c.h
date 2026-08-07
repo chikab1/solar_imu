@@ -35,7 +35,7 @@ extern "C" {
 typedef enum {
     ML307C_LOC_ERR_START = 0, /**< 配置或启动GNSS命令未成功。 */
     ML307C_LOC_ERR_TIMEOUT,   /**< 等待超时，未获得有效定位。 */
-    ML307C_LOC_ERR_URC,       /**< 收到+ MGNSSLOC但数据无效。 */
+    ML307C_LOC_ERR_URC,       /**< 收到`+MGNSSLOC`但格式或字段无效。 */
     ML307C_LOC_ERR_STOP       /**< 主动关闭GNSS未成功。 */
 } ML307C_LOC_Err_t;
 
@@ -141,6 +141,27 @@ void ML307C_Drain_Rx(uint32_t drain_ms);
 const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms);
 
 /**
+ * @brief 从MQTT publish URC中提取主题和JSON正文。
+ * @param urc 包含一条完整`+MQTTURC: "publish"`记录的缓冲区。
+ * @param topic 输出主题缓冲区。
+ * @param topic_size 主题缓冲区容量。
+ * @param payload 输出JSON正文缓冲区。
+ * @param payload_size 正文缓冲区容量。
+ * @return 1解析成功，0格式不完整或目标缓冲区不足。
+ */
+int ML307C_MQTT_Parse_Publish(const char *urc,
+                              char *topic, size_t topic_size,
+                              char *payload, size_t payload_size);
+
+/**
+ * @brief 等待并解析一条MQTT publish URC，不丢弃订阅ACK后已到达的数据。
+ * @return 1得到完整topic/payload，0超时。
+ */
+int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
+                             char *payload, size_t payload_size,
+                             uint32_t timeout_ms);
+
+/**
   * @brief  获取 ML307C 模组 IMEI (需模组已开机)
   * @retval 1: 成功, 0: 失败
   * @note   发送 AT+CGSN, 结果存入内部缓冲区, 通过 ML307C_Get_IMEI_Str() 获取
@@ -171,9 +192,10 @@ int ML307C_Send_CustomData(int16_t voltage_x100, int16_t angel_x100,
                            char *topic);
 
 /**
- * @brief 配置`+MGNSSLOC`上报并启动GNSS单次定位。
- * @return 1两条启动命令均收到OK，0任一步骤失败。
- * @note 严格顺序发送`AT+MGNSSLOC=1`和`AT+MGNSS=2`；随后应调用
+ * @brief 关闭NMEA输出并启动GNSS单次定位。
+ * @return 1必要配置和启动命令均收到OK，0任一步失败。
+ * @note 严格顺序为`AT+MGNSSCFG="nmea/mask",0`、`AT+MGNSSLOC=1`、
+ *       `AT+MGNSS=2`。NV mask在每个模组上电周期最多写一次；随后应调用
  *       ML307C_GPS_Wait_Fix()纯监听异步`+MGNSSLOC:` URC。
  */
 int  ML307C_GPS_Start(void);
@@ -255,6 +277,23 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
                             int year, int mon, int day,
                             int hour, int min, int sec,
                             char *topic, uint8_t dup);
+
+/**
+ * @brief 发送完整事件字段但刻意省略`loc`/`lbs`字段。
+ * @note 唤醒后的首条即时事件使用本接口；定位结果随后通过轻量GPS消息上报。
+ */
+int ML307C_Send_EventReport_WithoutLocation(const EventRecord_t *event,
+                                            int year, int mon, int day,
+                                            int hour, int min, int sec,
+                                            char *topic, uint8_t dup);
+
+/**
+ * @brief 发布唤醒链路的轻量GPS更新或GPS错误。
+ * @note 成功格式为`{"type":"gps","id":...,"ts":...,"loc":[lat,lon,sat]}`；
+ *       失败时loc为`"Err0".."Err3"`并携带`err:7`。
+ */
+int ML307C_Send_GPS_Update(uint32_t event_id, uint32_t timestamp,
+                           const ML307C_GPS_Data_t *gps, char *topic);
 
 /**
   * @brief  从 ML307C 网络时间同步到 STM32 RTC

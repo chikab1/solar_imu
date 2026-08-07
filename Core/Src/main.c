@@ -43,6 +43,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MAIN_GNSS_FIX_TIMEOUT_MS 180000U /* 手动完整测试也允许真实冷启动定位。 */
+/* (宏已迁移至对应模块: sys_config, power_manager, event_report, service_handler, low_power) */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
