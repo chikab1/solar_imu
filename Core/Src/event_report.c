@@ -27,7 +27,8 @@
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
 #define NETWORK_BUDGET_MS      240000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
-#define GNSS_FIRST_FIX_TIMEOUT_MS 60000U /* 每次4G重新上电后的首次冷启动搜星至少预留1分钟。 */
+#define GNSS_FIRST_FIX_TIMEOUT_MS  60000U  /* 4G重新上电后的首次冷启动搜星至少预留1分钟。 */
+#define BOOT_GNSS_FIX_TIMEOUT_MS  180000U  /* 程序启动首次搜星最多等待3分钟。 */
 #define GPS_SAMPLE_TIMEOUT_MS     3000U  /* 同一次上电周期内后续搜星通常很快，单次等待3秒。 */
 #define GPS_TRACK_INTERVAL_MS   3000U /* GPS持续跟踪检测与上报周期。 */
 #define GPS_STILL_DISTANCE_M    10.0f /* 位置变化不超过10米视为静止。 */
@@ -87,9 +88,9 @@ static float GPS_Distance_Meters(const ML307C_GPS_Data_t *from,
 
 /**
  * @brief 在已连接MQTT的前提下完成唤醒后的GPS更新和持续移动跟踪。
- * @note 初次定位最多等待3分钟；模组单次定位成功后自动关闭搜索。随后每3秒
- *       重发`AT+MGNSS=2`重新使能（不重置单次定位模式）查询位置并发送轻量
- *       GPS消息。连续三次与上一位置的距离不超过10米时返回，调用方随即关闭4G。
+ * @note 首次定位等待时间由调用入口决定；模组单次定位成功后自动关闭搜索。随后每3秒
+ *       重发`AT+MGNSS=2`重新使能（不重置单次定位模式）查询位置。只有发生明显位移
+ *       才发送轻量GPS消息；连续三次没有明显位移时返回，调用方随即关闭4G。
  */
 static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
                               char *topic, EventRecord_t *event)
@@ -129,13 +130,13 @@ static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
     if (gps_requeried &&
         ML307C_GPS_Wait_Fix(&current, GPS_SAMPLE_TIMEOUT_MS)) {
       float distance_m = has_previous ? GPS_Distance_Meters(&previous, &current) : 0.0f;
-      if (!ML307C_Send_GPS_Update(event_id, timestamp, &current, topic)) return 0U;
-      previous = current;
-      has_previous = 1U;
-      if (distance_m <= GPS_STILL_DISTANCE_M) {
-        if (++still_count >= GPS_STILL_SAMPLE_COUNT) return 1U;
-      } else {
+      if (distance_m > GPS_STILL_DISTANCE_M) {
+        if (!ML307C_Send_GPS_Update(event_id, timestamp, &current, topic)) return 0U;
+        previous = current;
+        has_previous = 1U;
         still_count = 0U;
+      } else if (++still_count >= GPS_STILL_SAMPLE_COUNT) {
+        return 1U;
       }
     } else {
       if (gps_requeried) (void)ML307C_GPS_Stop();
@@ -352,22 +353,6 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
   return 0U;
 }
 
-/** @brief Start the modem only after an IMU event has passed confirmation. */
-static uint8_t Start_Modem_After_Event_Validation(void)
-{
-  uint32_t start;
-
-  if (!ML307C_Is_Powered()) Turn_On_ML307C();
-  else ML307C_Clear_Buffer();
-
-  start = HAL_GetTick();
-  do {
-    if (ML307C_Send_CMD("AT", "OK", 500U) == 1) return 1U;
-    HAL_IWDG_Refresh(&hiwdg);
-    Delay_With_Service(100U);
-  } while ((HAL_GetTick() - start) < 5000U);
-  return 0U;
-}
 
 /**
  * @brief 执行一次从采样、低压判断、4G联网到QoS 1发布/失败落盘的完整链路。
@@ -394,12 +379,12 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint16_t voltage_mv = (voltage > 0.0f) ? (uint16_t)(voltage * 1000.0f + 0.5f) : 0U;
   uint8_t allow_modem = Volt_Fuse_Check(voltage);
   uint8_t store_current = (!manual && !rtc_flag && (wu_flag || d6d_flag));
-  uint8_t defer_modem = store_current;
   uint8_t current_stored = 0U;
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
   uint8_t sent = 0U;
   uint8_t wake_report = (uint8_t)(store_current || (wu_flag || d6d_flag));
+  uint8_t boot_report = g_report_boot;
   char topic[40];
   uint32_t report_start = HAL_GetTick();
 
@@ -423,11 +408,9 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   else if (rtc_flag) event.wake_reason = EVENT_WAKE_RTC;
   else event.wake_reason = EVENT_WAKE_MANUAL;
 
-  /* RTC/manual reports may overlap modem boot with capture.  IMU reports are
-   * confirmed first so a 6D false wake or cooldown duplicate never flashes
-   * the modem without publishing anything. */
+  /* Every report starts the modem during the 3-second capture window. */
   modem_ready = Capture_Event_And_Start_Modem(
-      &event, (uint8_t)(allow_modem && !defer_modem));
+      &event, (uint8_t)allow_modem);
   if (event.sample_count == 0U) event.fail_reason = EVENT_FAIL_INTERNAL;
   /* If PB1 proved an IMU event but the latched source bits disappeared before
    * they were read, classify it from the confirmed physical result. */
@@ -487,11 +470,6 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     if (store_current && voltage_mv >= FLASH_SAFE_VOLTAGE_MV)
       (void)EventStore_Enqueue(&event);
     goto report_cleanup;
-  }
-
-  if (defer_modem) {
-    g_last_report_stage = REPORT_STAGE_MODEM_READY;
-    modem_ready = Start_Modem_After_Event_Validation();
   }
 
   if (!modem_ready) {
@@ -563,13 +541,14 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
+  /* The IMU event is now already stored before queue publishing.  Keep the
+   * first GPS result as a lightweight update, then track only real movement. */
   if (wake_report) {
-    /* 唤醒链路：事件已即时发布，此处接入持续跟踪——首次冷启动搜星最多等待1分钟，
-     * 随后同一次上电周期内每3秒重发`AT+MGNSS=2`查询，连续三次静止才返回并关闭4G。 */
     (void)Track_Wake_GPS(event.event_id, event.timestamp, topic, &event);
   } else {
     if (ML307C_GPS_Start()) {
-      if (!ML307C_GPS_Wait_Fix(&gps, GNSS_FIRST_FIX_TIMEOUT_MS)) {
+      if (!ML307C_GPS_Wait_Fix(&gps, boot_report ? BOOT_GNSS_FIX_TIMEOUT_MS :
+                                                    GNSS_FIRST_FIX_TIMEOUT_MS)) {
         /* `AT+MGNSS=2`只会在成功后自动关闭；超时必须主动停止搜星。 */
         if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
           gps.err_code = ML307C_LOC_ERR_STOP;
