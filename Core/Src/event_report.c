@@ -27,10 +27,8 @@
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
 #define NETWORK_BUDGET_MS      240000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
-#define RTC_GNSS_FIX_TIMEOUT_MS 180000U /* RTC心跳必须最多等待3分钟定位。 */
-#define WAKE_GNSS_FIX_TIMEOUT_MS 180000U /* 唤醒后GPS定位最长3分钟。 */
-#define MANUAL_GNSS_FIX_TIMEOUT_MS 5000U /* 开机/维护手动上报保持原5秒定位预算。 */
-#define GPS_SAMPLE_TIMEOUT_MS   3000U /* 持续跟踪时每次定位检测的最长等待。 */
+#define GNSS_FIRST_FIX_TIMEOUT_MS 60000U /* 每次4G重新上电后的首次冷启动搜星至少预留1分钟。 */
+#define GPS_SAMPLE_TIMEOUT_MS     3000U  /* 同一次上电周期内后续搜星通常很快，单次等待3秒。 */
 #define GPS_TRACK_INTERVAL_MS   3000U /* GPS持续跟踪检测与上报周期。 */
 #define GPS_STILL_DISTANCE_M    10.0f /* 位置变化不超过10米视为静止。 */
 #define GPS_STILL_SAMPLE_COUNT  3U /* 连续三次静止后关闭4G。 */
@@ -106,7 +104,7 @@ static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
     event->fail_reason = EVENT_FAIL_GNSS;
     return ML307C_Send_GPS_Update(event_id, timestamp, &gps, topic);
   }
-  if (!ML307C_GPS_Wait_Fix(&gps, WAKE_GNSS_FIX_TIMEOUT_MS)) {
+  if (!ML307C_GPS_Wait_Fix(&gps, GNSS_FIRST_FIX_TIMEOUT_MS)) {
     if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
       gps.err_code = ML307C_LOC_ERR_STOP;
     else if (gps.err_code == ML307C_LOC_ERR_UNKNOWN)
@@ -566,13 +564,12 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
   if (wake_report) {
-    /* 唤醒链路：事件已即时发布，此处接入持续跟踪——初次定位最多3分钟，
-     * 随后每3秒重发`AT+MGNSS=2`查询，连续三次移动量小才返回并关闭4G。 */
+    /* 唤醒链路：事件已即时发布，此处接入持续跟踪——首次冷启动搜星最多等待1分钟，
+     * 随后同一次上电周期内每3秒重发`AT+MGNSS=2`查询，连续三次静止才返回并关闭4G。 */
     (void)Track_Wake_GPS(event.event_id, event.timestamp, topic, &event);
   } else {
     if (ML307C_GPS_Start()) {
-      if (!ML307C_GPS_Wait_Fix(&gps, rtc_flag ? RTC_GNSS_FIX_TIMEOUT_MS :
-                                                   MANUAL_GNSS_FIX_TIMEOUT_MS)) {
+      if (!ML307C_GPS_Wait_Fix(&gps, GNSS_FIRST_FIX_TIMEOUT_MS)) {
         /* `AT+MGNSS=2`只会在成功后自动关闭；超时必须主动停止搜星。 */
         if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
           gps.err_code = ML307C_LOC_ERR_STOP;
