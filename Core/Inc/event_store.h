@@ -7,8 +7,8 @@ extern "C" {
 
 #include <stdint.h>
 
-/** @brief Flash队列最多保存的事件数量。容量受64 KB Flash限制。 */
-#define EVENT_STORE_MAX_RECORDS 3U
+/** @brief Flash双缓存最多保存两条未确认送达的事件；索引0始终为最旧事件。 */
+#define EVENT_STORE_MAX_RECORDS 2U
 
 /** @brief 产生事件的唤醒源，数值会直接写入MQTT字段`w`。 */
 typedef enum {
@@ -63,7 +63,7 @@ typedef struct {
     uint8_t  flags;             /**< EVENT_FLAG_*按位组合。 */
     uint8_t  fail_reason;       /**< EventFailReason_t。 */
     uint8_t  reset_reason;      /**< STM32复位原因编码。 */
-    uint8_t  retry_count;       /**< 已进行的网络重传次数。 */
+    uint8_t  retry_count;       /**< 保留字段；当前产品不做定时网络重试，固定为0。 */
 } EventRecord_t;
 
 /**

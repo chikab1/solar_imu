@@ -221,7 +221,7 @@ last_report_fail：0无、1低压、2模组未就绪、3 SIM、4网络、5 MQTT�
 
 ### 5.4 READ_QUEUE（04）
 
-作用：读取断网后保存在Flash中的事件。最多3条，index=0为最旧事件。
+作用：读取断网后保存在Flash中的事件。最多2条，index=0为最旧事件。
 
 不带Payload，默认index=0：
 
@@ -262,7 +262,7 @@ Payload位置0为status，1为queue_count，2为index，3~54为事件记录。
 | 46 | u8 | flags |
 | 47 | u8 | fail_reason |
 | 48 | u8 | reset_reason |
-| 49 | u8 | retry_count |
+| 49 | u8 | retry_count（保留字段；当前固定为0） |
 
 队列为空或索引不存在返回状态04，不附带事件。
 
