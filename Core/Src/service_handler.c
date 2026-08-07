@@ -33,46 +33,6 @@ uint8_t g_service_task_running = 0U;      /**< 防止AT后台回调递归进入S
 
 /* ========================== 函数实现 ========================== */
 
-#if 0 /* Legacy text command parser retained only as migration reference. */
-/**
-  * @brief  处理 PC 发来的指令 (整行匹配)
-  */
-static void Process_PC_Command(const uint8_t *data, uint16_t len)
-{
-  /* 去掉尾部 \r\n */
-  while (len > 0 && (data[len-1] == '\r' || data[len-1] == '\n')) len--;
-  if (len == 0) return;
-
-  if (len == 3 && data[0] == '!' && data[1] == 'O' && data[2] == 'N') {
-    g_pending_cmd = CMD_ON;
-  }
-  else if (len == 4 && data[0] == '!' && data[1] == 'O' && data[2] == 'F' && data[3] == 'F') {
-    g_pending_cmd = CMD_OFF;
-  }
-  else if (len == 6 && data[0] == '!' && data[1] == 'S' && data[2] == 'L'
-                    && data[3] == 'E' && data[4] == 'E' && data[5] == 'P') {
-    g_pending_cmd = CMD_SLEEP;
-  }
-  else if (len == 5 && data[0] == '!' && data[1] == 'V' && data[2] == 'B'
-                    && data[3] == 'A' && data[4] == 'T') {
-    g_pending_cmd = CMD_VBAT;
-  }
-  else if (len == 5 && data[0] == '!' && data[1] == 'M' && data[2] == 'Q'
-                    && data[3] == 'T' && data[4] == 'T') {
-    g_pending_cmd = CMD_MQTT;
-  }
-  else if (len == 5 && data[0] == '!' && data[1] == 'T' && data[2] == 'E'
-                    && data[3] == 'S' && data[4] == 'T') {
-    g_pending_cmd = CMD_TEST;
-  }
-  else {
-    /* 非指令 → 透传给 4G 模组 (补回被剥离的 \r\n) */
-    HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 100);
-    HAL_UART_Transmit(&huart1, (uint8_t *)"\r\n", 2, 100);
-  }
-}
-#endif
-
 /**
  * @brief 执行一条已通过CRC校验的USART2维护命令并发送对应响应。
  * @param frame 请求帧；功能码、payload格式见service_protocol.h和README。

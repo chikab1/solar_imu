@@ -27,7 +27,7 @@ typedef struct {
     uint8_t  count;       /**< records中的有效事件数量。 */
     uint8_t  reserved0[7]; /**< 固定对齐/未来扩展，写入前填0xFF。 */
     EventRecord_t records[EVENT_STORE_MAX_RECORDS];
-    uint8_t  reserved1[76]; /**< 将crc32固定到偏移248，写入前填0xFF。 */
+    uint8_t  reserved1[128]; /**< 将crc32固定到偏移248，写入前填0xFF。 */
     uint32_t crc32;       /**< 从magic到reserved1的CRC32。 */
     uint32_t commit;      /**< 完整写入标记EVENT_STORE_COMMIT。 */
 } EventStoreSnapshot_t;
@@ -265,7 +265,7 @@ uint8_t EventStore_Get(uint8_t index, EventRecord_t *out_record)
  * @brief 将事件加入持久化队列。
  * @param record 待保存事件；event_id为0时函数会分配ID并回写。
  * @return 1保存成功，0参数无效、队列策略拒绝或Flash失败。
- * @details 队列满时优先替换严重度最低的旧事件；新事件更不严重则直接拒绝。
+ * @details 队列满时淘汰最旧事件，始终保留时间上最新的两条事件。
  */
 uint8_t EventStore_Enqueue(EventRecord_t *record)
 {
@@ -283,12 +283,8 @@ uint8_t EventStore_Enqueue(EventRecord_t *record)
     if (candidate_count < EVENT_STORE_MAX_RECORDS) {
         candidate[candidate_count++] = *record;
     } else {
-        uint8_t replace = 0U;
-        for (uint8_t i = 1U; i < candidate_count; i++) {
-            if (candidate[i].severity < candidate[replace].severity) replace = i;
-        }
-        if (record->severity < candidate[replace].severity) return 0U;
-        for (uint8_t i = replace; i + 1U < candidate_count; i++) {
+        /* FIFO双缓存已满：丢弃索引0的最旧记录，为最新事件腾出空间。 */
+        for (uint8_t i = 0U; i + 1U < candidate_count; i++) {
             candidate[i] = candidate[i + 1U];
         }
         candidate[candidate_count - 1U] = *record;

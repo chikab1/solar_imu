@@ -9,7 +9,7 @@
 - LSM6DS3TR-C Wake-Up 与 6D 共用 INT1，可分别识别冲击和缓慢倾倒。
 - STM32G031 可由 IMU、RTC 和维护串口从 Stop1 唤醒。
 - IMU 唤醒后连续采样 3 秒，同时启动 ML307C，完成 MQTT 上报后重新进入 Stop1。
-- 事件先写入最多 3 条的 Flash 队列，网络失败后按退避策略重传。
+- IMU事件先写入最多 2 条的 Flash 双缓存；网络失败后立即关机，在下一次正常心跳或IMU事件时按时间顺序补发。
 - MQTT 上行使用 QoS 1 并等待 PUBACK；`event_id`用于服务端去重。
 - USART2 使用带长度、序号、CRC16和帧尾的二进制维护协议。
 - USART2 已通过30轮Stop1边界、64字节负载、16帧突发、4096字节噪声及错误波特率恢复测试。
@@ -42,7 +42,7 @@ USART1使用PB6/PB7并配合DMA接收ML307C数据。USART2使用PA2/PA3连接CH3
 | IMU事件采样 | 3000 ms | 唤醒后采样窗口 |
 | 倾斜确认时间 | 500 ms | 连续超过阈值才确认倾斜 |
 | 串口维护超时 | 60 s | 无有效维护活动后重新休眠 |
-| 本地事件队列 | 3条 | 避免64 KB Flash被事件占满 |
+| 本地事件队列 | 2条FIFO双缓存 | 保留最近两条未确认送达的IMU事件 |
 
 配置保存在RTC备份寄存器中。设备安装零度轴可设置为`Z+、Z-、X+、X-、Y+、Y-`。
 
@@ -64,7 +64,7 @@ flowchart TD
     K --> N[写入/读取本地事件队列]
     M --> N
     N --> O{电压与网络预算允许?}
-    O -->|否| P[保留事件并安排退避重试]
+    O -->|否| P[保留事件并立即关机]
     O -->|是| Q[注册网络并连接MQTT]
     Q --> R[QoS 1发布并等待PUBACK]
     R --> S[订阅下行命令并返回ACK]
@@ -100,13 +100,11 @@ flowchart TD
 
 例如设备安装后重力方向为Y+，应设置`mount_axis=4`，此安装姿态即为0°。
 
-### 3.3 网络失败退避
+### 3.3 网络失败处理
 
-- 第一次失败：5分钟后重试。
-- 第二次失败：15分钟后重试。
-- 后续失败：60分钟后重试。
-- 低电量导致的失败：6小时后重试。
-- 连续网络异常会触发ML307C硬复位保护。
+- 网络、MQTT或PUBACK失败后，不创建额外RTC重试，立即安全关闭ML307C并回Stop1。
+- 关键IMU事件保存在最多2条的Flash FIFO双缓存中；下次原有心跳或下一次IMU事件联网成功后，先发送最旧缓存，再发送新消息。
+- 仅当`AT+MPOF=0`后`LTE_STATE`持续高电平超过8秒，才执行RESET硬件兜底；网络失败本身不会触发硬复位。
 
 ## 4. MQTT协议
 
@@ -165,8 +163,8 @@ flowchart TD
 | `gyro.p` | 三轴绝对峰值角速度，dps |
 | `sn` | 采样数量 |
 | `rst` | STM32复位原因 |
-| `r` | 当前事件重试次数 |
-| `loc` | 定位字段：RTC/人工完整上报成功时为`[纬度×10000, 经度×10000, 卫星数]`；失败为`"Err0".."Err3"`字符串，Err0=启动命令失败、Err1=等待定位超时、Err2=收到+ MGNSSLOC但数据无效、Err3=定位失败后关闭GNSS失败；唤醒首条事件会完全省略该字段，随后单独发送轻量GPS消息 |
+| `r` | 保留字段；当前无定时网络重试，固定为0 |
+| `loc` | 定位字段：成功为`[纬度×10000, 经度×10000, 卫星数]`；失败为`"Err0".."Err3"`字符串，Err0=启动命令失败、Err1=等待定位超时、Err2=收到+ MGNSSLOC但数据无效、Err3=定位失败后关闭GNSS失败；未尝试定位时为`null` |
 | `time` | RTC本地时间字符串；联网后由ML307C `AT+CCLK`校时，并按时区后缀把UTC转换为本地时间后写入RTC |
 | `err` | 失败原因：0无、1低压、2模块未就绪、3 SIM、4网络、5 MQTT连接、6 PUBACK、7 GNSS、8内部错误 |
 
@@ -699,7 +697,7 @@ arm-none-eabi-objcopy -O binary build/Debug/solar_imu.elf build/Debug/solar_imu.
 | `Core/Src/at_ml307c.c` | ML307C开关机、AT、注册、MQTT、GNSS |
 | `Core/Src/uart_driver.c` | 环形缓冲/DMA UART驱动 |
 | `Core/Src/service_protocol.c` | USART2二进制协议、CRC、半包/粘包/队列 |
-| `Core/Src/event_store.c` | 最多3条Flash事件队列 |
+| `Core/Src/event_store.c` | 最多2条FIFO Flash事件双缓存 |
 | `docs/service_protocol.md` | USART2协议字段级说明 |
 
 ### 8.1 建议的源码阅读顺序
@@ -753,6 +751,6 @@ main while(1)
 
 - RTC使用LSI，长周期时间精度不如外部LSE；联网成功后由ML307C校时。
 - Stop1下USART2第一字节必然可能丢失，因此必须执行`00 → READY → 完整帧`两阶段握手。
-- 本地Flash队列只有3条，长时间断网时只能保留有限数量的最新关键事件。
+- 本地Flash队列只有2条，长时间断网时只能保留最新两条IMU事件。
 - 当前测试Broker为明文连接，不可直接作为量产安全方案。
 - 链接器仍提示RWX LOAD segment警告，当前可运行，但正式发布前应进一步收紧链接段权限。

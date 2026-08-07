@@ -21,7 +21,6 @@
 
 /* ========================== 私有宏 ========================== */
 
-#define NET_FAIL_HARD_RESET_THRESHOLD  3
 #define IMU_CAPTURE_TIME_MS    3000U /* 3秒采样窗口，期间可并行开机4G模组 */
 #define IMU_SAMPLE_PERIOD_MS   10U
 #define TILT_CONFIRM_TIME_MS   500U
@@ -54,13 +53,6 @@
 
 /* ========================== 全局变量 ========================== */
 
-/* 联网失败计数器 (硬自愈自循环机制)
- * 连续 3 次联网超时, 第 4 次开机直接执行物理硬复位模组
- * 任意一次联网成功即清零 */
-uint8_t g_net_fail_count = 0; /**< 连续网络失败次数，成功后清零。 */
-
-uint8_t  g_retry_stage = 0;                 /**< 指数退避档位：5/15/60分钟。 */
-uint32_t g_retry_delay_sec = 0;            /**< 失败队列下次联网重试延时。 */
 uint32_t g_volatile_event_seq = 1;         /**< 不写Flash事件使用的临时event_id序列。 */
 
 uint8_t  g_last_report_ok = 0U;             /**< 最近完整上报是否成功。 */
@@ -241,30 +233,6 @@ static void Accel_To_Pitch_Roll_Cdeg(const float acc_mg[3],
 }
 
 /* ========================== 公共函数 ========================== */
-
-/**
- * @brief 网络失败后安排下一次RTC重试时间。
- * @param low_voltage 1表示低压，固定延迟6小时；0使用5/15/60分钟退避。
- */
-void Schedule_Network_Retry(uint8_t low_voltage)
-{
-  if (low_voltage) {
-    g_retry_stage = 2U;
-    g_retry_delay_sec = 21600U;
-    return;
-  }
-  if (g_retry_stage == 0U) g_retry_delay_sec = 300U;
-  else if (g_retry_stage == 1U) g_retry_delay_sec = 900U;
-  else g_retry_delay_sec = 3600U;
-  if (g_retry_stage < 2U) g_retry_stage++;
-}
-
-/** @brief 上报成功后清除网络退避档位和剩余延时。 */
-void Clear_Network_Retry(void)
-{
-  g_retry_stage = 0U;
-  g_retry_delay_sec = 0U;
-}
 
 /**
  * @brief 连续采集3秒IMU，同时可并行执行ML307C开机脉冲和MATREADY监听。
@@ -519,7 +487,6 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     event.fail_reason = EVENT_FAIL_LOW_VOLTAGE;
     if (store_current && voltage_mv >= FLASH_SAFE_VOLTAGE_MV)
       (void)EventStore_Enqueue(&event);
-    Schedule_Network_Retry(1U);
     goto report_cleanup;
   }
 
@@ -532,8 +499,6 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     g_last_report_stage = REPORT_STAGE_MODEM_READY;
     event.fail_reason = EVENT_FAIL_MODEM_READY;
     if (store_current) (void)EventStore_Enqueue(&event);
-    g_net_fail_count++;
-    Schedule_Network_Retry(0U);
     goto report_cleanup;
   }
 
@@ -542,32 +507,16 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     event.event_id = event.timestamp ? event.timestamp : g_volatile_event_seq++;
   }
 
-  if (g_net_fail_count >= NET_FAIL_HARD_RESET_THRESHOLD) {
-    g_last_report_stage = REPORT_STAGE_MODEM_READY;
-    ML307C_Hard_Reset();
-    g_net_fail_count = 0U;
-    if (ML307C_Send_CMD("AT", "OK", 8000) != 1) {
-      event.fail_reason = EVENT_FAIL_MODEM_READY;
-      Schedule_Network_Retry(0U);
-      goto report_cleanup;
-    }
-  }
-
   g_last_report_stage = REPORT_STAGE_IMEI;
   if (!ML307C_Has_IMEI() && !ML307C_Get_IMEI()) {
     event.fail_reason = EVENT_FAIL_INTERNAL;
-    g_net_fail_count++;
-    Schedule_Network_Retry(0U);
     goto report_cleanup;
   }
   g_last_report_stage = REPORT_STAGE_NETWORK;
   if (!ML307C_Wait_Network(NETWORK_BUDGET_MS, &network)) {
     event.fail_reason = EVENT_FAIL_NETWORK;
-    g_net_fail_count++;
-    Schedule_Network_Retry(0U);
     goto report_cleanup;
   }
-  g_net_fail_count = 0U;
   g_last_report_csq = (network.csq >= 0 && network.csq <= 255) ?
                        (uint8_t)network.csq : 99U;
   g_last_report_attached = network.is_attached ? 1U : 0U;
@@ -579,10 +528,40 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   if (ML307C_MQTT_Connect("101.34.217.153", 1883,
                           "solar_imu", "solar_imu") != 1) {
     event.fail_reason = EVENT_FAIL_MQTT_CONNECT;
-    Schedule_Network_Retry(0U);
     goto report_cleanup;
   }
   mqtt_connected = 1U;
+
+  snprintf(topic, sizeof(topic), "device/%s/data", ML307C_Get_IMEI_Str());
+
+  /* Flash队列是唯一的未送达标志。连接成功后先按FIFO发送所有旧记录，
+   * 只有收到每条QoS 1 PUBACK后才删除对应快照。新IMU事件已先落盘，
+   * 因而它位于旧记录之后并自然成为本轮最后一条。 */
+  g_last_report_stage = REPORT_STAGE_QUEUE;
+  while (EventStore_Count() > 0U) {
+    uint8_t is_current_event;
+    if (!EventStore_Get(0U, &queued)) {
+      event.fail_reason = EVENT_FAIL_INTERNAL;
+      sent = 0U;
+      goto report_cleanup;
+    }
+    is_current_event = (uint8_t)(current_stored &&
+                                 queued.event_id == event.event_id);
+    if (!ML307C_Send_EventReport(&queued, NULL, NULL,
+                                 2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
+                                 rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
+                                 topic, (uint8_t)(is_current_event ? 0U : 1U))) {
+      event.fail_reason = EVENT_FAIL_MQTT_PUBACK;
+      sent = 0U;
+      goto report_cleanup;
+    }
+    if (!EventStore_Remove(queued.event_id)) {
+      event.fail_reason = EVENT_FAIL_INTERNAL;
+      sent = 0U;
+      goto report_cleanup;
+    }
+    sent = 1U;
+  }
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
   if (!wake_report) {
@@ -606,56 +585,23 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   if (!gps.is_fixed) (void)ML307C_Get_LBS_Info(&lbs);
 #endif
 
-  g_last_report_stage = REPORT_STAGE_PUBLISH;
-  snprintf(topic, sizeof(topic), "device/%s/data", ML307C_Get_IMEI_Str());
-  if (wake_report) {
-    /* 唤醒首条消息不带本机GPS loc，随后由轻量GPS消息补发。 */
-    sent = ML307C_Send_EventReport_WithoutLocation(&event,
-                                                    2000 + rtc_date.Year,
-                                                    rtc_date.Month, rtc_date.Date,
-                                                    rtc_time.Hours, rtc_time.Minutes,
-                                                    rtc_time.Seconds, topic, 0U);
-  } else {
+  /* 心跳和人工请求不会写入Flash；旧队列清空后才发送这条临时的新消息。 */
+  if (!current_stored) {
+    g_last_report_stage = REPORT_STAGE_PUBLISH;
     sent = ML307C_Send_EventReport(&event, &gps, &lbs,
-                                   2000 + rtc_date.Year, rtc_date.Month,
-                                   rtc_date.Date, rtc_time.Hours, rtc_time.Minutes,
-                                   rtc_time.Seconds, topic, 0U);
-  }
-  if (!sent) event.fail_reason = EVENT_FAIL_MQTT_PUBACK;
-  payload_sent = sent;
-  if (sent && current_stored) (void)EventStore_Remove(event.event_id);
-
-  if (sent && wake_report) {
-    g_last_report_stage = REPORT_STAGE_LOCATION;
-    gps_followup_ok = Track_Wake_GPS(event.event_id, event.timestamp,
-                                      topic, &event);
-    if (!gps_followup_ok) sent = 0U;
-  }
-
-  if (sent && !wake_report && EventStore_Count() > 0U &&
-      EventStore_Get(0U, &queued) && queued.event_id != event.event_id) {
-    g_last_report_stage = REPORT_STAGE_QUEUE;
-    if (queued.retry_count < 0xFFU) queued.retry_count++;
-    if (ML307C_Send_EventReport(&queued, &gps, &lbs,
-                                2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
-                                rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
-                                topic, 1U)) {
-      (void)EventStore_Remove(queued.event_id);
-    } else {
+                                   2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
+                                   rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
+                                   topic, 0U);
+    if (!sent) {
       event.fail_reason = EVENT_FAIL_MQTT_PUBACK;
-      sent = 0U;
+      goto report_cleanup;
     }
   }
 
   g_last_report_stage = REPORT_STAGE_DOWNLINK;
   if (sent && rtc_flag) (void)Check_MQTT_Settings();
   else if (sent && !wake_report) (void)Check_MQTT_Downlink();
-  if (sent) {
-    Clear_Network_Retry();
-    if (EventStore_Count() > 0U) Schedule_Network_Retry(0U);
-  } else {
-    Schedule_Network_Retry(0U);
-  }
+  /* 网络失败不创建额外RTC重试；未确认事件保留在Flash双缓存，下次心跳/事件时补发。 */
 
 report_cleanup:
   g_last_report_fail = event.fail_reason;

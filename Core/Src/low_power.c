@@ -169,11 +169,8 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
           HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
                            IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET) ? 1U : 0U);
   __enable_irq();
+  /* 网络失败不创建额外RTC重试；只按用户配置的正常心跳周期再次唤醒。 */
   requested_sleep = g_cfg.sleep_sec;
-  if (g_retry_delay_sec > 0U) {
-    if (g_low_volt_fuse) requested_sleep = g_retry_delay_sec;
-    else if (g_retry_delay_sec < requested_sleep) requested_sleep = g_retry_delay_sec;
-  }
   if (requested_sleep < 1U) requested_sleep = 1U;
   if (requested_sleep > 65535U) requested_sleep = 65535U;
   g_rtc_last_requested_sleep = requested_sleep;

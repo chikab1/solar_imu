@@ -9,9 +9,6 @@ extern "C" {
 #include "event_store.h"
 
 /* 全局变量声明 */
-extern uint8_t  g_net_fail_count;
-extern uint8_t  g_retry_stage;
-extern uint32_t g_retry_delay_sec;
 extern uint32_t g_volatile_event_seq;
 extern uint8_t  g_last_report_ok;
 extern uint8_t  g_last_report_stage;
@@ -31,8 +28,6 @@ void     Write_LE16(uint8_t *p, uint16_t value);
 void     Write_LE32(uint8_t *p, uint32_t value);
 
 /* 核心上报链路 */
-void     Schedule_Network_Retry(uint8_t low_voltage);
-void     Clear_Network_Retry(void);
 uint8_t  Capture_Event_And_Start_Modem(EventRecord_t *event,
                                        uint8_t start_modem);
 uint8_t  Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
