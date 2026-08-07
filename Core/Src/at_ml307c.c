@@ -461,7 +461,7 @@ void ML307C_Clear_Buffer(void)
  * @brief 丢弃延迟到达的旧AT响应，避免被下一条命令误匹配。
  * @param drain_ms 最大清理预算；连续100 ms无数据会提前返回。
  */
-void ML307C_Drain_Rx(uint32_t drain_ms)
+void ML307C_Drain_Rdx(uint32_t drain_ms)
 {
     uint32_t start = HAL_GetTick();
     uint32_t last_data = start;
@@ -973,68 +973,6 @@ int ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms)
     return 0;
 }
 
-/**
-  * @brief  从 UART 缓冲区扫描并解析 NMEA $GNGGA 句，提取定位数据。
-  * @param  gps_data:    输出 GPS 数据结构体。
-  * @retval 1: 成功解析且 fix 有效  0: 未找到、fix 无效或字段解析失败。
-  * @note   $GNGGA 格式: $GNGGA,hhmmss.ss,llll.ll,a,yyyyy.yy,a,x,xx,x.x,x.x,M,x.x,M,,*xx
-  *         字段2=纬度(ddmm.mmmm), 3=N/S, 4=经度(dddmm.mmmm), 5=E/W, 6=fix(0=无效), 7=卫星数。
-  *         手动逐字段解析，不用 sscanf/strtok，避免浮点库和缓冲区破坏。
-  */
-int ML307C_GPS_Parse(char *uart_rx_buf, ML307C_GPS_Data_t *gps_data)
-{
-    if (uart_rx_buf == NULL || gps_data == NULL) return 0;
-    gps_data->err_code = ML307C_LOC_ERR_UNKNOWN;
-
-    /* 从后往前找最后一个 $GNGGA（最新的定位数据） */
-    char *gga = NULL;
-    char *scan = uart_rx_buf;
-    while (1) {
-        char *next = strstr(scan, "$GNGGA,");
-        if (next == NULL) break;
-        gga = next;
-        scan = next + 1;
-    }
-    if (gga == NULL) return 0;
-
-    /* 截取本句到下一个 $ 或 \r\n */
-    char *end = strpbrk(gga + 1, "$\r\n");
-    char saved = 0;
-    if (end != NULL) { saved = *end; *end = '\0'; }
-
-    /* 逗号分割字段 */
-    char *fields[16] = {0};
-    uint8_t fc = 0;
-    fields[fc++] = gga;
-    for (char *c = gga; *c && fc < 16; c++) {
-        if (*c == ',') { *c = '\0'; fields[fc++] = c + 1; }
-    }
-
-    int fix = 0, sat = 0;
-    float lat = 0.0f, lon = 0.0f;
-
-    if (fc > 6) {
-        fix = atoi(fields[6]);  /* 字段6: fix quality, 0=无效 */
-    }
-    if (fc > 7) {
-        sat = atoi(fields[7]);  /* 字段7: 卫星数 */
-    }
-    if (fix > 0 && fc > 5) {
-        lat = NMEA_DegMin_To_Deg(fields[2]);  /* 纬度: ddmm.mmmm */
-        if (fields[3][0] == 'S') lat = -lat;
-        lon = NMEA_DegMin_To_Deg(fields[4]);  /* 经度: dddmm.mmmm */
-        if (fields[5][0] == 'W') lon = -lon;
-    }
-
-    if (end != NULL) *end = saved;  /* 恢复原字符 */
-
-    gps_data->is_fixed   = (fix > 0) ? 1 : 0;
-    gps_data->satellites = sat;
-    gps_data->latitude   = lat;
-    gps_data->longitude  = lon;
-    if (!gps_data->is_fixed) gps_data->err_code = ML307C_LOC_ERR_TIMEOUT;
-    return gps_data->is_fixed;
-}
 
 /**
   * @brief  获取 LBS 基站定位信息 (MCC, MNC, TAC, Cell ID)

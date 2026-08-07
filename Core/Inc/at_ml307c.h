@@ -220,13 +220,6 @@ int  ML307C_GPS_Stop(void);
  */
 int  ML307C_GPS_Requery(void);
 
-/**
- * @brief 从ML307C GNSS响应中解析经纬度、卫星数和定位状态。
- * @param uart_rx_buf 含定位响应的可写字符串缓冲区。
- * @param gps_data 输出结构体。
- * @return 1定位有效，0格式无效或尚未定位。
- */
-int  ML307C_GPS_Parse(char *uart_rx_buf, ML307C_GPS_Data_t *gps_data);
 
 /** @brief 查询并解析MCC/MNC/TAC/Cell ID。@return 1有效，0失败。 */
 int  ML307C_Get_LBS_Info(ML307C_LBS_Data_t *lbs);
