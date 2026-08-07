@@ -84,6 +84,7 @@ static float GPS_Distance_Meters(const ML307C_GPS_Data_t *from,
             sinf(dlon * 0.5f) * sinf(dlon * 0.5f);
   if (a > 1.0f) a = 1.0f;
   return 2.0f * earth_radius_m * asinf(sqrtf(a));
+  
 }
 
 /**
