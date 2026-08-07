@@ -120,6 +120,48 @@ register decoding. Wake-up/6D source bits classify the event as reasons 1, 2,
 or 3; if PB1 woke the MCU but both source bits have already cleared, the event
 is conservatively reported as reason 1 and `imu_source_fallback_count` rises.
 
+The default RTC heartbeat remains one hour. Its cellular communication budget is
+240 seconds and it waits up to 180 seconds for a GNSS fix before publishing the
+full report. A timeout is published as `loc:"Err1"` and `err:7`.
+
+A single GNSS fix is started in this exact order:
+
+```text
+AT+MGNSSCFG="nmea/mask",0
+AT+MGNSSLOC=1
+AT+MGNSS=2
+```
+
+The NMEA mask is an NV setting. The firmware confirms it once per modem power
+cycle and does not rewrite it for every fix; a future production revision can
+move this to modem provisioning after a verified query format is available.
+Only `fix=2` or `fix=3` in `+MGNSSLOC:` is accepted. A successful single fix
+ends with the modem's `+MGNSSURC: "state",0`, while a timeout or malformed
+result is stopped with `AT+MGNSS=0`.
+
+For the verified sample `3018.8462N,12020.2967E,...,fix=3,...,07`, the parsed
+result is approximately latitude `30.314103`, longitude `120.338278`, and
+7 satellites. S/W hemisphere markers produce negative coordinates.
+
+An IMU wake publishes its full event JSON first, deliberately omitting both
+`loc` and `lbs`. A lightweight GPS message follows on `device/<IMEI>/data`:
+
+```json
+{"type":"gps","id":97,"ts":1784611601,"loc":[3105123,12145678,9]}
+```
+
+A failed fix uses `loc:"Err0".."Err3"` and `err:7`. After the first fix, the
+device samples and publishes location every three seconds. Three consecutive
+moves of at most 10 metres relative to the previous valid fix close the modem;
+a move over 10 metres clears the still counter and keeps GPS/MQTT active.
+
+The MQTT `loc` array remains the compatibility format
+`[latitude*10000, longitude*10000, satellites]`. This carries approximately
+0.0001 degree resolution (about 11.1 m latitude and 9.6 m longitude near 30°N)
+and therefore loses some raw GNSS precision; this protocol is unchanged. The
+production event path remains GPS-only; LBS fallback is disabled there. LBS is
+still attempted only by the maintenance diagnostic path.
+
 READ_QUEUE response data after the status byte:
 
 `queue_count:u8, index:u8, EventRecord_t:52 bytes`
@@ -157,21 +199,32 @@ longer changes the interrupt routing.
 
 ## MQTT downlink configuration
 
-Configuration messages on `device/<IMEI>/cmd` must contain:
+After a successful RTC heartbeat report, the device subscribes to the shared
+`device/settings` topic. The server should publish the settings with QoS 1 and
+retain enabled so a device can fetch them during its hourly connection window:
 
 ```json
 {
+  "imei": "867926053214567",
   "cmd_id": 123,
   "ver": 1,
   "exp": 1780000000,
-  "wu": 300,
-  "tilt": 30,
-  "mount": 0,
   "sleep": 3600,
-  "vlow": 3550
+  "tilt": 30,
+  "wu": 500
 }
 ```
 
-`exp` is a Unix timestamp. Repeated, expired, or unsupported commands are
-ignored. Applied commands are acknowledged with QoS 1 on
-`device/<IMEI>/ack` using `{"cmd_id":123,"ok":1}`.
+`imei` must be exactly 15 decimal digits and match the modem IMEI. Non-matching
+devices silently ignore the shared message. `sleep` accepts 10..65535 seconds,
+`tilt` accepts 10..90 degrees, and `wu` accepts 250..2000 mg. Partial updates
+are allowed, but at least one settings field must be valid. A changed sleep
+period restarts the accumulated RTC interval from zero.
+
+Only the shared `device/settings` topic is used for configuration; the device no
+longer subscribes to a per-device `device/<IMEI>/cmd` topic.
+
+`exp` is a Unix timestamp. Repeated, expired, unsupported, mismatched, or
+out-of-range commands are ignored. Applied commands are persisted in the RTC
+backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using
+`{"cmd_id":123,"ok":1}`.

@@ -30,6 +30,7 @@ static uint16_t s_rx_buf_len = 0;                   /**< 聚合缓冲中已接�
 static char     s_at_tx_buf[512];                   /**< 所有AT命令和MQTT JSON命令复用发送区。 */
 
 static char     s_imei[32] = {0};                   /**< 已读取的模组IMEI，掉电前持续有效。 */
+static uint8_t  s_nmea_mask_off_confirmed = 0U;     /**< 本次模组上电周期已确认NMEA关闭。 */
 
 void ML307C_Drain_Rx(uint32_t drain_ms);
 
@@ -517,6 +518,77 @@ const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms)
     return NULL;
 }
 
+int ML307C_MQTT_Parse_Publish(const char *urc,
+                              char *topic, size_t topic_size,
+                              char *payload, size_t payload_size)
+{
+    const char *publish;
+    const char *topic_start;
+    const char *topic_end;
+    const char *json_start;
+    const char *json_end;
+    size_t topic_len;
+    size_t payload_len;
+
+    if (urc == NULL || topic == NULL || topic_size == 0U ||
+        payload == NULL || payload_size == 0U) return 0;
+
+    publish = strstr(urc, "+MQTTURC: \"publish\"");
+    if (publish == NULL) return 0;
+
+    /* OneMO固件在publish URC中以引号包围topic。跳过"publish"后，
+     * 查找第一段以device/开头的引号字符串，兼容中间附带连接ID等字段。 */
+    topic_start = strstr(publish + 20, "\"device/");
+    if (topic_start == NULL) return 0;
+    topic_start++;
+    topic_end = strchr(topic_start, '"');
+    if (topic_end == NULL) return 0;
+
+    json_start = strchr(topic_end + 1, '{');
+    json_end = (json_start != NULL) ? strrchr(json_start, '}') : NULL;
+    if (json_start == NULL || json_end == NULL || json_end < json_start) return 0;
+
+    topic_len = (size_t)(topic_end - topic_start);
+    payload_len = (size_t)(json_end - json_start + 1);
+    if (topic_len + 1U > topic_size || payload_len + 1U > payload_size) return 0;
+
+    memcpy(topic, topic_start, topic_len);
+    topic[topic_len] = '\0';
+    memcpy(payload, json_start, payload_len);
+    payload[payload_len] = '\0';
+    return 1;
+}
+
+int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
+                             char *payload, size_t payload_size,
+                             uint32_t timeout_ms)
+{
+    uint32_t start_tick = HAL_GetTick();
+
+    while ((HAL_GetTick() - start_tick) < timeout_ms) {
+        uint16_t avail;
+        uint16_t space;
+        uint16_t to_read;
+
+        HAL_IWDG_Refresh(&hiwdg);
+        ML307C_Background_Poll();
+        if (ML307C_MQTT_Parse_Publish((const char *)s_uart_rx_buf,
+                                      topic, topic_size,
+                                      payload, payload_size)) return 1;
+
+        avail = UART_Available(&g_uart1_drv);
+        space = ML307C_MAX_BUF_SIZE - s_rx_buf_len - 1U;
+        to_read = (avail < space) ? avail : space;
+        if (to_read > 0U) {
+            s_rx_buf_len += UART_Read(&g_uart1_drv,
+                                      s_uart_rx_buf + s_rx_buf_len, to_read);
+            s_uart_rx_buf[s_rx_buf_len] = '\0';
+        }
+        HAL_Delay(5U);
+    }
+    return 0;
+}
+
 
 /* ================================================================ *
  *  Turn_On_ML307C  /  Turn_Off_ML307C  (硬件控制)                 *
@@ -533,6 +605,8 @@ const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms)
  */
 void ML307C_Begin_PowerOn(void)
 {
+    /* 模组即将重新上电，不能沿用上一个电源周期的NV确认状态。 */
+    s_nmea_mask_off_confirmed = 0U;
     (void)UART1_RestartReceive();
     ML307C_Clear_Buffer();
     HAL_GPIO_WritePin(LTE_PWRKEY_GPIO_Port, LTE_PWRKEY_Pin, GPIO_PIN_SET);
@@ -589,7 +663,10 @@ void Turn_On_ML307C(void)
 void Turn_Off_ML307C(void)
 {
     ML307C_End_PowerOn_Pulse();
-    if (!ML307C_Is_Powered()) return;
+    if (!ML307C_Is_Powered()) {
+        s_nmea_mask_off_confirmed = 0U;
+        return;
+    }
     ML307C_Clear_Buffer();
 
     /* ① 发送软件关机指令 */
@@ -607,9 +684,11 @@ void Turn_Off_ML307C(void)
             HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_SET);
             ML307C_DelayWithPoll(100U);
             HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_RESET);
+            s_nmea_mask_off_confirmed = 0U;
             break;
         }
     }
+    s_nmea_mask_off_confirmed = 0U;
 }
 
 /**
@@ -619,6 +698,7 @@ void Turn_Off_ML307C(void)
   */
 void ML307C_Hard_Reset(void)
 {
+    s_nmea_mask_off_confirmed = 0U;
     HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_SET);
     ML307C_DelayWithPoll(500U);
     HAL_GPIO_WritePin(LTE_RESET_GPIO_Port, LTE_RESET_Pin, GPIO_PIN_RESET);
@@ -629,13 +709,26 @@ void ML307C_Hard_Reset(void)
  *  GPS 功能                                                        *
  * ================================================================ */
 
+typedef enum {
+    ML307C_LOC_PARSE_MALFORMED = -1,
+    ML307C_LOC_PARSE_NO_FIX = 0,
+    ML307C_LOC_PARSE_FIXED = 1
+} ML307C_LOC_ParseResult_t;
+
 /**
-  * @brief 配置并启动GNSS单次定位。
-  * @retval 1: 两条命令均确认成功  0: 配置或启动失败。
-  * @note 必须先开启`+MGNSSLOC:`上报，再进入`AT+MGNSS=2`单次定位模式。
+  * @brief 关闭NMEA输出并启动GNSS单次定位。
+  * @retval 1: 必要配置与两条启动命令均确认成功  0: 任一步失败。
+  * @note 严格顺序为`nmea/mask=0`、`MGNSSLOC=1`、`MGNSS=2`。
+  *       nmea/mask是NV配置；因尚无已验证的查询响应格式，本实现每个模组
+  *       上电周期最多写一次，后续应移至量产初始化或改为查询后按需写。
   */
 int ML307C_GPS_Start(void)
 {
+    if (!s_nmea_mask_off_confirmed) {
+        if (ML307C_Send_CMD("AT+MGNSSCFG=\"nmea/mask\",0", "OK", 3000) != 1)
+            return 0;
+        s_nmea_mask_off_confirmed = 1U;
+    }
     if (ML307C_Send_CMD("AT+MGNSSLOC=1", "OK", 3000) != 1) return 0;
     if (ML307C_Send_CMD("AT+MGNSS=2", "OK", 3000) != 1) return 0;
     return 1;
@@ -748,7 +841,8 @@ static int ML307C_GPS_Parse_LOC_Coord(const char *field, uint16_t len,
  * @brief 从一行完整`+MGNSSLOC:` URC解析定位结果。
  * @note 字段顺序：time,lat,lon,hdop,alt,fix,...,date,nsat,...；fix仅2/3有效。
  */
-static int ML307C_GPS_Parse_LOC(const char *response, ML307C_GPS_Data_t *gps_data)
+static ML307C_LOC_ParseResult_t ML307C_GPS_Parse_LOC(const char *response,
+                                                      ML307C_GPS_Data_t *gps_data)
 {
     const char *fields[11];
     const char *p;
@@ -760,9 +854,9 @@ static int ML307C_GPS_Parse_LOC(const char *response, ML307C_GPS_Data_t *gps_dat
     float latitude;
     float longitude;
 
-    if (response == NULL || gps_data == NULL) return 0;
+    if (response == NULL || gps_data == NULL) return ML307C_LOC_PARSE_MALFORMED;
     p = strstr(response, "+MGNSSLOC:");
-    if (p == NULL) return 0;
+    if (p == NULL) return ML307C_LOC_PARSE_MALFORMED;
     p += 10U;
     while (*p == ' ' || *p == '\t') p++;
 
@@ -772,24 +866,28 @@ static int ML307C_GPS_Parse_LOC(const char *response, ML307C_GPS_Data_t *gps_dat
         while (*end != '\0' && *end != ',' && *end != '\r' && *end != '\n') end++;
         lengths[index] = (uint16_t)(end - p);
         if (index < 10U) {
-            if (*end != ',') return 0;
+            if (*end != ',') return ML307C_LOC_PARSE_MALFORMED;
             p = end + 1;
         }
     }
 
     if (!ML307C_GPS_Parse_UInt(fields[5], fields[5] + lengths[5], &fix) ||
-        !ML307C_GPS_Parse_UInt(fields[10], fields[10] + lengths[10], &satellites) ||
-        (fix != 2 && fix != 3) || satellites < 0 || satellites > 99 ||
+        fix < 0 || fix > 3) {
+        return ML307C_LOC_PARSE_MALFORMED;
+    }
+    if (fix != 2 && fix != 3) return ML307C_LOC_PARSE_NO_FIX;
+    if (!ML307C_GPS_Parse_UInt(fields[10], fields[10] + lengths[10], &satellites) ||
+        satellites < 0 || satellites > 99 ||
         !ML307C_GPS_Parse_LOC_Coord(fields[1], lengths[1], 2U, &latitude) ||
         !ML307C_GPS_Parse_LOC_Coord(fields[2], lengths[2], 3U, &longitude)) {
-        return 0;
+        return ML307C_LOC_PARSE_MALFORMED;
     }
 
     gps_data->latitude = latitude;
     gps_data->longitude = longitude;
     gps_data->satellites = satellites;
     gps_data->is_fixed = 1;
-    return 1;
+    return ML307C_LOC_PARSE_FIXED;
 }
 
 /**
@@ -835,12 +933,15 @@ int ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms)
         while (loc != NULL) {
             line_end = strpbrk(loc, "\r\n");
             if (line_end == NULL) break;
-            if (ML307C_GPS_Parse_LOC(loc, gps_data)) {
+            ML307C_LOC_ParseResult_t parse_result = ML307C_GPS_Parse_LOC(loc, gps_data);
+            if (parse_result == ML307C_LOC_PARSE_FIXED) {
+                gps_data->err_code = ML307C_LOC_ERR_UNKNOWN;
                 return 1;
             }
-            /* 收到完整的+MGNSSLOC行但解析无效：定位数据异常。 */
-            gps_data->err_code = ML307C_LOC_ERR_URC;
-            loc = strstr(line_end + 1, "+MGNSSLOC:");
+            if (parse_result == ML307C_LOC_PARSE_MALFORMED)
+                gps_data->err_code = ML307C_LOC_ERR_URC;
+            /* NO_FIX is a valid report without a usable fix; keep listening. */
+            loc = strstr(loc + 1, "+MGNSSLOC:");
         }
 
         /* 先压缩再读取，持续腾出空间并避免无关URC导致缓冲卡死。 */
@@ -1194,12 +1295,13 @@ int ML307C_Send_FullReport(int16_t v_x100, int16_t tilt_x100,
  * @param dup 0首次发送，1表示同一event_id重发。
  * @return 1收到PUBACK，0参数、JSON长度或发布失败。
  */
-int ML307C_Send_EventReport(const EventRecord_t *event,
-                            ML307C_GPS_Data_t *gps,
-                            ML307C_LBS_Data_t *lbs,
-                            int year, int mon, int day,
-                            int hour, int min, int sec,
-                            char *topic, uint8_t dup)
+static int ML307C_Send_EventReport_Internal(const EventRecord_t *event,
+                                            ML307C_GPS_Data_t *gps,
+                                            ML307C_LBS_Data_t *lbs,
+                                            int year, int mon, int day,
+                                            int hour, int min, int sec,
+                                            char *topic, uint8_t dup,
+                                            uint8_t include_location)
 {
     char json[384];
     int n;
@@ -1224,20 +1326,20 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
         event->sample_count, event->reset_reason, event->retry_count);
     if (n <= 0 || n >= (int)sizeof(json)) return 0;
 
-    if (gps != NULL && gps->is_fixed) {
+    if (include_location && gps != NULL && gps->is_fixed) {
         int lat = (int)(gps->latitude * 10000.0f);
         int lon = (int)(gps->longitude * 10000.0f);
         n += snprintf(json + n, sizeof(json) - (size_t)n,
                       ",\"loc\":[%d,%d,%d]", lat, lon, gps->satellites);
-    } else if (gps != NULL && gps->err_code >= ML307C_LOC_ERR_START) {
+    } else if (include_location && gps != NULL && gps->err_code >= ML307C_LOC_ERR_START) {
         /* GNSS已尝试但失败：Err0=启动失败,Err1=超时,Err2=无效数据,Err3=停止失败。 */
         n += snprintf(json + n, sizeof(json) - (size_t)n,
                       ",\"loc\":\"Err%d\"", gps->err_code);
-    } else if (lbs != NULL && lbs->valid) {
+    } else if (include_location && lbs != NULL && lbs->valid) {
         n += snprintf(json + n, sizeof(json) - (size_t)n,
                       ",\"lbs\":[%d,%d,%d,%d]",
                       lbs->mcc, lbs->mnc, lbs->tac, lbs->cell_id);
-    } else {
+    } else if (include_location) {
         n += snprintf(json + n, sizeof(json) - (size_t)n, ",\"loc\":null");
     }
     if (n <= 0 || n >= (int)sizeof(json)) return 0;
@@ -1249,6 +1351,51 @@ int ML307C_Send_EventReport(const EventRecord_t *event,
     if (n <= 0 || n >= (int)sizeof(json)) return 0;
 
     return ML307C_MQTT_PublishEx(topic, json, dup);
+}
+
+int ML307C_Send_EventReport(const EventRecord_t *event,
+                            ML307C_GPS_Data_t *gps,
+                            ML307C_LBS_Data_t *lbs,
+                            int year, int mon, int day,
+                            int hour, int min, int sec,
+                            char *topic, uint8_t dup)
+{
+    return ML307C_Send_EventReport_Internal(event, gps, lbs, year, mon, day,
+                                            hour, min, sec, topic, dup, 1U);
+}
+
+int ML307C_Send_EventReport_WithoutLocation(const EventRecord_t *event,
+                                            int year, int mon, int day,
+                                            int hour, int min, int sec,
+                                            char *topic, uint8_t dup)
+{
+    return ML307C_Send_EventReport_Internal(event, NULL, NULL, year, mon, day,
+                                            hour, min, sec, topic, dup, 0U);
+}
+
+int ML307C_Send_GPS_Update(uint32_t event_id, uint32_t timestamp,
+                           const ML307C_GPS_Data_t *gps, char *topic)
+{
+    char json[128];
+    int n;
+
+    if (gps == NULL || topic == NULL) return 0;
+    if (gps->is_fixed) {
+        n = snprintf(json, sizeof(json),
+                     "{\"type\":\"gps\",\"id\":%lu,\"ts\":%lu,\"loc\":[%d,%d,%d]}",
+                     (unsigned long)event_id, (unsigned long)timestamp,
+                     (int)(gps->latitude * 10000.0f),
+                     (int)(gps->longitude * 10000.0f), gps->satellites);
+    } else {
+        int err_code = (gps->err_code >= ML307C_LOC_ERR_START) ?
+                       gps->err_code : ML307C_LOC_ERR_TIMEOUT;
+        n = snprintf(json, sizeof(json),
+                     "{\"type\":\"gps\",\"id\":%lu,\"ts\":%lu,\"loc\":\"Err%d\",\"err\":%u}",
+                     (unsigned long)event_id, (unsigned long)timestamp,
+                     err_code, EVENT_FAIL_GNSS);
+    }
+    if (n <= 0 || n >= (int)sizeof(json)) return 0;
+    return ML307C_MQTT_Publish(topic, json);
 }
 
 /** @brief 按公历返回某月天数（含闰年），month为1~12。 */

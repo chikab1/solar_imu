@@ -27,8 +27,14 @@
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
-#define NETWORK_BUDGET_MS      20000U /* 20秒网络握手预算，含AT、附着、信号、定位、MQTT */
-#define GNSS_FIX_TIMEOUT_MS    5000U /* 单次定位最长等待5秒；底层驱动不内置该策略。 */
+#define NETWORK_BUDGET_MS      240000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
+#define RTC_GNSS_FIX_TIMEOUT_MS 180000U /* RTC心跳必须最多等待3分钟定位。 */
+#define WAKE_GNSS_FIX_TIMEOUT_MS 180000U /* 唤醒后GPS定位最长3分钟。 */
+#define MANUAL_GNSS_FIX_TIMEOUT_MS 5000U /* 开机/维护手动上报保持原5秒定位预算。 */
+#define GPS_SAMPLE_TIMEOUT_MS   3000U /* 持续跟踪时每次定位检测的最长等待。 */
+#define GPS_TRACK_INTERVAL_MS   3000U /* GPS持续跟踪检测与上报周期。 */
+#define GPS_STILL_DISTANCE_M    10.0f /* 位置变化不超过10米视为静止。 */
+#define GPS_STILL_SAMPLE_COUNT  3U /* 连续三次静止后关闭4G。 */
 #define EVENT_COOLDOWN_SEC      30U
 #define REPORT_STAGE_IDLE        0U
 #define REPORT_STAGE_CAPTURE     1U
@@ -72,7 +78,87 @@ uint16_t g_imu_false_wake_count = 0U;         /**< 3秒复核后不满足任何�
 
 /* ========================== 私有函数 ========================== */
 
-/** @brief 将浮点测量值饱和转换为有符号16位整数。 */
+static float GPS_Distance_Meters(const ML307C_GPS_Data_t *from,
+                                 const ML307C_GPS_Data_t *to)
+{
+  const float deg_to_rad = 0.01745329252f;
+  const float earth_radius_m = 6371000.0f;
+  float lat1 = from->latitude * deg_to_rad;
+  float lat2 = to->latitude * deg_to_rad;
+  float dlat = lat2 - lat1;
+  float dlon = (to->longitude - from->longitude) * deg_to_rad;
+  float a = sinf(dlat * 0.5f) * sinf(dlat * 0.5f) +
+            cosf(lat1) * cosf(lat2) *
+            sinf(dlon * 0.5f) * sinf(dlon * 0.5f);
+  if (a > 1.0f) a = 1.0f;
+  return 2.0f * earth_radius_m * asinf(sqrtf(a));
+}
+
+/**
+ * @brief 在已连接MQTT的前提下完成唤醒后的GPS更新和持续移动跟踪。
+ * @note 初次定位最多等待3分钟；定位成功后每3秒发送轻量GPS消息。连续三次
+ *       与上一位置的距离不超过10米时返回，调用方随即关闭4G。
+ */
+static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
+                              char *topic, EventRecord_t *event)
+{
+  ML307C_GPS_Data_t gps = {0};
+  ML307C_GPS_Data_t previous = {0};
+  uint8_t still_count = 0U;
+  uint8_t has_previous = 0U;
+
+  if (!ML307C_GPS_Start()) {
+    gps.err_code = ML307C_LOC_ERR_START;
+    event->fail_reason = EVENT_FAIL_GNSS;
+    return ML307C_Send_GPS_Update(event_id, timestamp, &gps, topic);
+  }
+  if (!ML307C_GPS_Wait_Fix(&gps, WAKE_GNSS_FIX_TIMEOUT_MS)) {
+    if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+      gps.err_code = ML307C_LOC_ERR_STOP;
+    else if (gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+      gps.err_code = ML307C_LOC_ERR_TIMEOUT;
+    gps.is_fixed = 0;
+    event->fail_reason = EVENT_FAIL_GNSS;
+    return ML307C_Send_GPS_Update(event_id, timestamp, &gps, topic);
+  }
+
+  if (!ML307C_Send_GPS_Update(event_id, timestamp, &gps, topic)) return 0U;
+  previous = gps;
+  has_previous = 1U;
+
+  while (1) {
+    ML307C_GPS_Data_t current = {0};
+    uint32_t sample_start = HAL_GetTick();
+    uint8_t gps_started;
+
+    /* 单次定位成功后会自动结束；只有成功启动但未定位才需要主动Stop。 */
+    gps_started = ML307C_GPS_Start() ? 1U : 0U;
+    if (gps_started &&
+        ML307C_GPS_Wait_Fix(&current, GPS_SAMPLE_TIMEOUT_MS)) {
+      float distance_m = has_previous ? GPS_Distance_Meters(&previous, &current) : 0.0f;
+      if (!ML307C_Send_GPS_Update(event_id, timestamp, &current, topic)) return 0U;
+      previous = current;
+      has_previous = 1U;
+      if (distance_m <= GPS_STILL_DISTANCE_M) {
+        if (++still_count >= GPS_STILL_SAMPLE_COUNT) return 1U;
+      } else {
+        still_count = 0U;
+      }
+    } else {
+      if (gps_started) (void)ML307C_GPS_Stop();
+      still_count = 0U;
+    }
+
+    while ((HAL_GetTick() - sample_start) < GPS_TRACK_INTERVAL_MS) {
+      HAL_IWDG_Refresh(&hiwdg);
+      Service_Task(1U);
+      HAL_Delay(10U);
+    }
+  }
+}
+
+/**
+ * @brief 将浮点测量值饱和转换为有符号16位整数。 */
 static int16_t Clamp_Int16(float value)
 {
   if (value > 32767.0f) return 32767;
@@ -344,6 +430,9 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
   uint8_t sent = 0U;
+  uint8_t payload_sent = 0U;
+  uint8_t wake_report = (uint8_t)(store_current || (wu_flag || d6d_flag));
+  uint8_t gps_followup_ok = 1U;
   char topic[40];
   uint32_t report_start = HAL_GetTick();
 
@@ -496,14 +585,22 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   mqtt_connected = 1U;
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
-  if (ML307C_GPS_Start()) {
-    if (!ML307C_GPS_Wait_Fix(&gps, GNSS_FIX_TIMEOUT_MS)) {
-      /* `AT+MGNSS=2`只会在成功后自动关闭；超时必须主动停止搜星。 */
-      if (!ML307C_GPS_Stop()) gps.err_code = ML307C_LOC_ERR_STOP;
-      gps.is_fixed = 0;
+  if (!wake_report) {
+    if (ML307C_GPS_Start()) {
+      if (!ML307C_GPS_Wait_Fix(&gps, rtc_flag ? RTC_GNSS_FIX_TIMEOUT_MS :
+                                                   MANUAL_GNSS_FIX_TIMEOUT_MS)) {
+        /* `AT+MGNSS=2`只会在成功后自动关闭；超时必须主动停止搜星。 */
+        if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+          gps.err_code = ML307C_LOC_ERR_STOP;
+        else if (gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+          gps.err_code = ML307C_LOC_ERR_TIMEOUT;
+        gps.is_fixed = 0;
+        event.fail_reason = EVENT_FAIL_GNSS;
+      }
+    } else {
+      gps.err_code = ML307C_LOC_ERR_START;
+      event.fail_reason = EVENT_FAIL_GNSS;
     }
-  } else {
-    gps.err_code = ML307C_LOC_ERR_START;
   }
 #if 0 /* LBS兜底：GPS失败时改用基站定位；当前GPS-only，需要时把0改为1打开测试 */
   if (!gps.is_fixed) (void)ML307C_Get_LBS_Info(&lbs);
@@ -511,15 +608,32 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
 
   g_last_report_stage = REPORT_STAGE_PUBLISH;
   snprintf(topic, sizeof(topic), "device/%s/data", ML307C_Get_IMEI_Str());
-  sent = ML307C_Send_EventReport(&event, &gps, &lbs,
-                                 2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
-                                 rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
-                                 topic, 0U);
+  if (wake_report) {
+    /* 唤醒首条消息不带本机GPS loc，随后由轻量GPS消息补发。 */
+    sent = ML307C_Send_EventReport_WithoutLocation(&event,
+                                                    2000 + rtc_date.Year,
+                                                    rtc_date.Month, rtc_date.Date,
+                                                    rtc_time.Hours, rtc_time.Minutes,
+                                                    rtc_time.Seconds, topic, 0U);
+  } else {
+    sent = ML307C_Send_EventReport(&event, &gps, &lbs,
+                                   2000 + rtc_date.Year, rtc_date.Month,
+                                   rtc_date.Date, rtc_time.Hours, rtc_time.Minutes,
+                                   rtc_time.Seconds, topic, 0U);
+  }
   if (!sent) event.fail_reason = EVENT_FAIL_MQTT_PUBACK;
+  payload_sent = sent;
   if (sent && current_stored) (void)EventStore_Remove(event.event_id);
 
-  if (sent && EventStore_Count() > 0U && EventStore_Get(0U, &queued) &&
-      queued.event_id != event.event_id) {
+  if (sent && wake_report) {
+    g_last_report_stage = REPORT_STAGE_LOCATION;
+    gps_followup_ok = Track_Wake_GPS(event.event_id, event.timestamp,
+                                      topic, &event);
+    if (!gps_followup_ok) sent = 0U;
+  }
+
+  if (sent && !wake_report && EventStore_Count() > 0U &&
+      EventStore_Get(0U, &queued) && queued.event_id != event.event_id) {
     g_last_report_stage = REPORT_STAGE_QUEUE;
     if (queued.retry_count < 0xFFU) queued.retry_count++;
     if (ML307C_Send_EventReport(&queued, &gps, &lbs,
@@ -534,7 +648,8 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_DOWNLINK;
-  (void)Check_MQTT_Downlink();
+  if (sent && rtc_flag) (void)Check_MQTT_Settings();
+  else if (sent && !wake_report) (void)Check_MQTT_Downlink();
   if (sent) {
     Clear_Network_Retry();
     if (EventStore_Count() > 0U) Schedule_Network_Retry(0U);
@@ -545,7 +660,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
 report_cleanup:
   g_last_report_fail = event.fail_reason;
   g_last_report_stage = sent ? REPORT_STAGE_COMPLETE : g_last_report_stage;
-  g_last_report_ok = sent ? 1U : 0U;
+  g_last_report_ok = payload_sent ? 1U : 0U;
   if (mqtt_connected) (void)ML307C_Send_CMD("AT+MQTTDISC=0", "OK", 2000);
   if (!sent && g_last_report_stage == REPORT_STAGE_DOWNLINK)
     g_last_report_stage = REPORT_STAGE_PUBLISH;

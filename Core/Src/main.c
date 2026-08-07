@@ -43,6 +43,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MAIN_GNSS_FIX_TIMEOUT_MS 180000U /* 手动完整测试也允许真实冷启动定位。 */
 /* (宏已迁移至对应模块: sys_config, power_manager, event_report, service_handler, low_power) */
 /* USER CODE END PD */
 
@@ -495,11 +496,17 @@ int main(void)
             ML307C_GPS_Data_t gps = {0};
             ML307C_LBS_Data_t lbs = {0};
             if (ML307C_GPS_Start()) {
-              if (!ML307C_GPS_Wait_Fix(&gps, 5000U)) {
+              if (!ML307C_GPS_Wait_Fix(&gps, MAIN_GNSS_FIX_TIMEOUT_MS)) {
                 /* 单次定位仅成功后自动关闭；失败/超时必须显式停止。 */
-                (void)ML307C_GPS_Stop();
+                if (!ML307C_GPS_Stop() && gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+                  gps.err_code = ML307C_LOC_ERR_STOP;
+                else if (gps.err_code == ML307C_LOC_ERR_UNKNOWN)
+                  gps.err_code = ML307C_LOC_ERR_TIMEOUT;
                 gps.is_fixed = 0;
               }
+            } else {
+              gps.err_code = ML307C_LOC_ERR_START;
+              gps.is_fixed = 0;
             }
 
             if (!gps.is_fixed) {
