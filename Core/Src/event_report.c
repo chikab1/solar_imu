@@ -88,8 +88,9 @@ static float GPS_Distance_Meters(const ML307C_GPS_Data_t *from,
 
 /**
  * @brief 在已连接MQTT的前提下完成唤醒后的GPS更新和持续移动跟踪。
- * @note 初次定位最多等待3分钟；定位成功后每3秒发送轻量GPS消息。连续三次
- *       与上一位置的距离不超过10米时返回，调用方随即关闭4G。
+ * @note 初次定位最多等待3分钟；模组单次定位成功后自动关闭搜索。随后每3秒
+ *       重发`AT+MGNSS=2`重新使能（不重置单次定位模式）查询位置并发送轻量
+ *       GPS消息。连续三次与上一位置的距离不超过10米时返回，调用方随即关闭4G。
  */
 static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
                               char *topic, EventRecord_t *event)
@@ -121,11 +122,12 @@ static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
   while (1) {
     ML307C_GPS_Data_t current = {0};
     uint32_t sample_start = HAL_GetTick();
-    uint8_t gps_started;
+    uint8_t gps_requeried;
 
-    /* 单次定位成功后会自动结束；只有成功启动但未定位才需要主动Stop。 */
-    gps_started = ML307C_GPS_Start() ? 1U : 0U;
-    if (gps_started &&
+    /* 单次定位成功会关闭MGNSS，这里仅重发`AT+MGNSS=2`重新使能；只有
+     * 重发成功但本次未定位时才需要主动Stop。 */
+    gps_requeried = ML307C_GPS_Requery() ? 1U : 0U;
+    if (gps_requeried &&
         ML307C_GPS_Wait_Fix(&current, GPS_SAMPLE_TIMEOUT_MS)) {
       float distance_m = has_previous ? GPS_Distance_Meters(&previous, &current) : 0.0f;
       if (!ML307C_Send_GPS_Update(event_id, timestamp, &current, topic)) return 0U;
@@ -137,7 +139,7 @@ static uint8_t Track_Wake_GPS(uint32_t event_id, uint32_t timestamp,
         still_count = 0U;
       }
     } else {
-      if (gps_started) (void)ML307C_GPS_Stop();
+      if (gps_requeried) (void)ML307C_GPS_Stop();
       still_count = 0U;
     }
 
@@ -398,9 +400,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
   uint8_t sent = 0U;
-  uint8_t payload_sent = 0U;
   uint8_t wake_report = (uint8_t)(store_current || (wu_flag || d6d_flag));
-  uint8_t gps_followup_ok = 1U;
   char topic[40];
   uint32_t report_start = HAL_GetTick();
 
@@ -564,7 +564,11 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
-  if (!wake_report) {
+  if (wake_report) {
+    /* 唤醒链路：事件已即时发布，此处接入持续跟踪——初次定位最多3分钟，
+     * 随后每3秒重发`AT+MGNSS=2`查询，连续三次移动量小才返回并关闭4G。 */
+    (void)Track_Wake_GPS(event.event_id, event.timestamp, topic, &event);
+  } else {
     if (ML307C_GPS_Start()) {
       if (!ML307C_GPS_Wait_Fix(&gps, rtc_flag ? RTC_GNSS_FIX_TIMEOUT_MS :
                                                    MANUAL_GNSS_FIX_TIMEOUT_MS)) {
@@ -606,7 +610,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
 report_cleanup:
   g_last_report_fail = event.fail_reason;
   g_last_report_stage = sent ? REPORT_STAGE_COMPLETE : g_last_report_stage;
-  g_last_report_ok = payload_sent ? 1U : 0U;
+  g_last_report_ok = sent ? 1U : 0U;
   if (mqtt_connected) (void)ML307C_Send_CMD("AT+MQTTDISC=0", "OK", 2000);
   if (!sent && g_last_report_stage == REPORT_STAGE_DOWNLINK)
     g_last_report_stage = REPORT_STAGE_PUBLISH;

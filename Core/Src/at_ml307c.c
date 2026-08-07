@@ -734,6 +734,16 @@ int ML307C_GPS_Start(void)
     return 1;
 }
 
+/**
+ * @brief 单次定位成功后重新使能GNSS报告而不重置单次定位模式。
+ * @note 定位成功后模组会自动关闭`MGNSS`；持续跟踪时每隔一段时间重发
+ *       `AT+MGNSS=2`唤醒搜索，`MGNSSLOC`保持为1（每成功一次自动关闭）。
+ */
+int ML307C_GPS_Requery(void)
+{
+    return (ML307C_Send_CMD("AT+MGNSS=2", "OK", 3000) == 1) ? 1 : 0;
+}
+
 /** @brief 主动关闭尚未完成单次定位的GNSS。 */
 int ML307C_GPS_Stop(void)
 {

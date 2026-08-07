@@ -213,6 +213,14 @@ int  ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms);
 int  ML307C_GPS_Stop(void);
 
 /**
+ * @brief 单次定位成功后重新使能GNSS报告而不重置单次定位模式。
+ * @note 定位成功模组会自动关闭`MGNSS`；持续跟踪时重发`AT+MGNSS=2`唤醒
+ *       搜索即可，`MGNSSLOC`保持为1。
+ * @return 1收到OK，0失败。
+ */
+int  ML307C_GPS_Requery(void);
+
+/**
  * @brief 从ML307C GNSS响应中解析经纬度、卫星数和定位状态。
  * @param uart_rx_buf 含定位响应的可写字符串缓冲区。
  * @param gps_data 输出结构体。
