@@ -99,6 +99,7 @@ extern uint8_t  g_report_wu;
 extern uint8_t  g_report_6d;
 extern uint8_t  g_report_rtc;
 extern uint8_t  g_report_source_fallback;
+extern uint8_t  g_report_boot;
 
 /* 启动诊断 */
 extern uint8_t g_iwdg_runs_in_stop;

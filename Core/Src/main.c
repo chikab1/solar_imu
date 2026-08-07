@@ -43,7 +43,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define MAIN_GNSS_FIX_TIMEOUT_MS 180000U /* 手动完整测试也允许真实冷启动定位。 */
+#define MAIN_GNSS_FIX_TIMEOUT_MS 180000U /* 程序启动首次冷启动搜星最多等待3分钟。 */
 /* (宏已迁移至对应模块: sys_config, power_manager, event_report, service_handler, low_power) */
 /* USER CODE END PD */
 
@@ -75,6 +75,7 @@ uint8_t g_report_wu = 0;                  /**< 下一次上报是否由WAKE-UP�
 uint8_t g_report_6d = 0;                  /**< 下一次上报是否由6D触发。 */
 uint8_t g_report_rtc = 0;                 /**< 下一次上报是否由RTC心跳触发。 */
 uint8_t g_report_source_fallback = 0U;    /**< 下一次上报是否使用INT1来源兜底分类。 */
+uint8_t g_report_boot = 0U;               /**< 下一次上报是否为MCU启动后的首次上报。 */
 uint8_t g_iwdg_runs_in_stop = 0;          /**< Option Bytes是否允许IWDG在Stop继续计数。 */
 uint8_t g_imu_ok = 0;                      /**< IMU初始化和门卫配置是否成功。 */
 uint8_t g_reset_reason = 0;                /**< RCC复位原因位图，上报到事件记录。 */
@@ -160,6 +161,7 @@ int main(void)
   g_report_wu = 0U;
   g_report_6d = 0U;
   g_report_rtc = 0U;
+  g_report_boot = 1U;
   g_pending_cmd = CMD_TEST;
 
   /* USER CODE END 2 */
@@ -202,6 +204,7 @@ int main(void)
       (void)Run_Event_Report(wu, d6d, rtc,
                             (uint8_t)(!wu && !d6d && !rtc),
                             source_fallback);
+      g_report_boot = 0U;
       g_service_busy = 0U;
       if (g_serial_session_active) g_last_uart2_activity = HAL_GetTick();
     }
