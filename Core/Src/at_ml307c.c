@@ -461,7 +461,7 @@ void ML307C_Clear_Buffer(void)
  * @brief 丢弃延迟到达的旧AT响应，避免被下一条命令误匹配。
  * @param drain_ms 最大清理预算；连续100 ms无数据会提前返回。
  */
-void ML307C_Drain_Rdx(uint32_t drain_ms)
+void ML307C_Drain_Rx(uint32_t drain_ms)
 {
     uint32_t start = HAL_GetTick();
     uint32_t last_data = start;
