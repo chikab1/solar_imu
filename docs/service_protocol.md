@@ -122,11 +122,10 @@ status `05` (busy). The standalone `00` wake token still returns the wake
 acknowledgement.
 The host can retry the original request after the report finishes.
 
-When IWDG remains active in Stop1, long sleep periods are split into 20-second
-RTC guard intervals. Those intervals are handled inside one Stop1 operation:
-the MCU wakes, refreshes IWDG, rearms RTC, and immediately sleeps again. The
-main state machine is resumed only for the requested heartbeat deadline, an
-IMU event, a serial wake, or an RTC-arm failure.
+IWDG is frozen in Stop1 by the option byte. The RTC wake-up timer therefore
+uses its approximately 1 Hz `CK_SPRE` clock and a single 16-bit interval; the
+MCU stays asleep until an IMU event, serial wake, RTC expiry, or RTC-arm
+failure.
 
 On every MCU boot, the device attempts one battery-protected boot report with
 wake reason 5. IMU INT1 rising edges are latched in software before source
@@ -230,10 +229,11 @@ retain enabled so a device can fetch them during its hourly connection window:
 ```
 
 `imei` must be exactly 15 decimal digits and match the modem IMEI. Non-matching
-devices silently ignore the shared message. `sleep` accepts 10..65535 seconds,
+devices silently ignore the shared message. `sleep` accepts 600..65535 seconds
+(default 3600),
 `tilt` accepts 10..90 degrees, and `wu` accepts 250..2000 mg. Partial updates
 are allowed, but at least one settings field must be valid. A changed sleep
-period restarts the accumulated RTC interval from zero.
+period restarts the RTC period from zero.
 
 Only the shared `device/settings` topic is used for configuration; the device no
 longer subscribes to a per-device `device/<IMEI>/cmd` topic.

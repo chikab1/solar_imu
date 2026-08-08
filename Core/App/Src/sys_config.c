@@ -67,7 +67,8 @@ void Config_Load(void)
         g_cfg.tilt_deg = CFG_DEFAULT_TILT_DEG;
         Config_Save();
     }
-    if (g_cfg.sleep_sec < 10U || g_cfg.sleep_sec > 65535U) {
+    if (g_cfg.sleep_sec < SYS_CONFIG_SLEEP_MIN_SEC ||
+        g_cfg.sleep_sec > SYS_CONFIG_SLEEP_MAX_SEC) {
         g_cfg.sleep_sec = CFG_DEFAULT_SLEEP_SEC;
         Config_Save();
     }
@@ -190,7 +191,8 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
         updated = 1U;
     }
     if (Parse_Json_Int(payload, "sleep", &val)) {
-        if (val < 10 || val > 65535) return 0U;
+        if (val < (int)SYS_CONFIG_SLEEP_MIN_SEC ||
+            val > (int)SYS_CONFIG_SLEEP_MAX_SEC) return 0U;
         next.sleep_sec = (uint32_t)val;
         sleep_changed = (next.sleep_sec != g_cfg.sleep_sec) ? 1U : 0U;
         updated = 1U;

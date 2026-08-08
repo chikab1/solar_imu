@@ -104,7 +104,8 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
       uint32_t sleep = Read_LE32(&frame->payload[4]);
       uint16_t vlow = Read_LE16(&frame->payload[8]);
       if (wu < 250U || wu > 2000U || tilt < 10U || tilt > 90U ||
-          sleep < 10U || sleep > 65535U ||
+          sleep < SYS_CONFIG_SLEEP_MIN_SEC ||
+          sleep > SYS_CONFIG_SLEEP_MAX_SEC ||
           vlow < 3500U || vlow > 4000U) {
         status = SERVICE_STATUS_BAD_VALUE;
       } else {

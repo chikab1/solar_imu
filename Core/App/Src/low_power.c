@@ -18,27 +18,25 @@
 
 /* ========================== 私有宏 ========================== */
 
-#define RTC_LSI_DIV16_TICKS_PER_SEC 2000U
-#define RTC_MAX_CHUNK_SEC       32U
 #define IMU_SOURCE_SETTLE_MS   2U
 
 /* ========================== 全局变量 ========================== */
 
-/* MX_RTC_Init() 在上电时已首次启用 RTC 唤醒定时器。 */
-uint8_t  g_rtc_timer_active = 1U;          /**< 1表示RTC唤醒定时器当前已启用。 */
+/* RTC 仅在准备进入 Stop1 前布防，避免启动阶段的无意义周期中断。 */
+uint8_t  g_rtc_timer_active = 0U;          /**< 1表示RTC唤醒定时器当前已启用。 */
 uint16_t g_rtc_arm_count = 0U;            /**< RTC定时器布防尝试累计数。 */
-uint16_t g_rtc_last_interval = 0U;        /**< 最近一次分段Stop时长，秒。 */
+uint16_t g_rtc_last_interval = 0U;        /**< 最近一次Stop布防时长，秒。 */
 uint32_t g_rtc_last_cr = 0U;              /**< 布防后的RTC->CR诊断快照。 */
 uint32_t g_rtc_last_sr = 0U;              /**< 布防后的RTC->SR诊断快照。 */
 uint32_t g_rtc_last_requested_sleep = 0U; /**< 最近请求的总休眠秒数。 */
-uint16_t g_rtc_consumed_count = 0U;       /**< 被内部看门狗分段消费的RTC唤醒数。 */
+uint16_t g_rtc_consumed_count = 0U;       /**< RTC硬件唤醒次数。 */
 uint16_t g_rtc_ready_count = 0U;          /**< 已达到业务心跳时间的RTC唤醒数。 */
 uint8_t  g_rtc_arm_status = HAL_OK;            /**< 最近一次RTC唤醒定时器布防结果。 */
 uint8_t  g_rtc_deactivate_status = HAL_OK;     /**< 最近一次RTC定时器停用结果。 */
 uint16_t g_imu_wu_source_count = 0U;          /**< 仅WAKE-UP源累计次数。 */
 uint16_t g_imu_6d_source_count = 0U;          /**< 仅6D源累计次数。 */
 uint16_t g_imu_both_source_count = 0U;        /**< WU和6D同时置位累计次数。 */
-uint32_t g_guard_sleep_accum_sec = 0;     /**< RTC分段休眠的累计秒数。 */
+uint32_t g_guard_sleep_accum_sec = 0;     /**< 兼容诊断字段；一次性RTC布防时始终为0。 */
 uint16_t g_rtc_hw_wake_count = 0U;   /**< 直接观察到RTC WUTF的次数。 */
 uint8_t  g_imu_source_fallback_count = 0U;     /**< INT1有效但源寄存器已清时的兜底次数。 */
 
@@ -102,7 +100,7 @@ uint8_t IMU_Drain_INT1_Latch(uint8_t *out_wu, uint8_t *out_6d)
  * @param out_source_fallback 返回是否仅凭INT1确认、未读到具体IMU源。
  * @details USART2_RX在Stop前临时改为下降沿EXTI，0x00为牺牲唤醒字节；唤醒后
  * 恢复复用功能并重启ReceiveToIdle。IWDG在Stop1下已通过Option Byte冻结，
- * RTC按不超过32秒分段（16位WUT硬件上限），直到事件或总周期到达。
+ * RTC使用约1 Hz的CK_SPRE 16位计数器一次性布防，最长65535秒。
  * 函数从WFI之后原位置继续执行，不会重新运行main()初始化。
  */
 void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
@@ -172,17 +170,16 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   __enable_irq();
   /* 网络失败不创建额外RTC重试；只按用户配置的正常心跳周期再次唤醒。 */
   requested_sleep = g_cfg.sleep_sec;
-  if (requested_sleep < 1U) requested_sleep = 1U;
-  if (requested_sleep > 65535U) requested_sleep = 65535U;
+  if (requested_sleep < SYS_CONFIG_SLEEP_MIN_SEC)
+    requested_sleep = SYS_CONFIG_SLEEP_MIN_SEC;
+  if (requested_sleep > SYS_CONFIG_SLEEP_MAX_SEC)
+    requested_sleep = SYS_CONFIG_SLEEP_MAX_SEC;
   g_rtc_last_requested_sleep = requested_sleep;
 
   for (;;) {
-    uint32_t remaining_sleep = requested_sleep - g_guard_sleep_accum_sec;
     rtc_event = 0U;
     entered_stop = 0U;
-    rtc_interval = remaining_sleep;
-    if (rtc_interval > RTC_MAX_CHUNK_SEC)
-      rtc_interval = RTC_MAX_CHUNK_SEC;
+    rtc_interval = requested_sleep;
 
     if (g_rtc_timer_active) {
       g_rtc_deactivate_status =
@@ -193,16 +190,16 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
     g_rtc_last_interval = (uint16_t)rtc_interval;
     if (g_rtc_arm_count < 0xFFFFU) g_rtc_arm_count++;
     g_rtc_arm_status = (uint8_t)HAL_RTCEx_SetWakeUpTimer_IT(
-        &hrtc, rtc_interval * RTC_LSI_DIV16_TICKS_PER_SEC - 1U,
-        RTC_WAKEUPCLOCK_RTCCLK_DIV16);
+        &hrtc, rtc_interval - 1U,
+        RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
     g_rtc_timer_active = (g_rtc_arm_status == HAL_OK) ? 1U : 0U;
     if (g_rtc_arm_status != HAL_OK) {
       g_rtc_deactivate_status =
           (uint8_t)HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
       g_rtc_timer_active = 0U;
       g_rtc_arm_status = (uint8_t)HAL_RTCEx_SetWakeUpTimer_IT(
-          &hrtc, rtc_interval * RTC_LSI_DIV16_TICKS_PER_SEC - 1U,
-          RTC_WAKEUPCLOCK_RTCCLK_DIV16);
+          &hrtc, rtc_interval - 1U,
+          RTC_WAKEUPCLOCK_CK_SPRE_16BITS);
       g_rtc_timer_active = (g_rtc_arm_status == HAL_OK) ? 1U : 0U;
     }
     g_rtc_last_cr = RTC->CR;
@@ -252,7 +249,7 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
       break;
     }
 
-    /* 维护口或 IMU 中断优先于周期性RTC分段唤醒；真实事件后重新计算心跳周期。 */
+    /* 维护口或 IMU 中断优先于RTC周期唤醒；真实事件后重新计算心跳周期。 */
     if (g_uart2_wakeup_flag || g_uart2_activity_flag ||
         g_imu_exti_wakeup_flag ||
         HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
@@ -269,13 +266,9 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
       if (g_rtc_ready_count < 0xFFFFU) g_rtc_ready_count++;
       break;
     }
-    g_guard_sleep_accum_sec += rtc_interval;
-    if (g_guard_sleep_accum_sec >= requested_sleep) {
-      g_guard_sleep_accum_sec = 0U;
-      if (g_rtc_ready_count < 0xFFFFU) g_rtc_ready_count++;
-      break;
-    }
-    /* RTC分段唤醒：继续休眠下一段，不返回业务主状态机。 */
+    g_guard_sleep_accum_sec = 0U;
+    if (g_rtc_ready_count < 0xFFFFU) g_rtc_ready_count++;
+    break;
   }
 
   /* WFI 返回后直接继续执行，SRAM 与外设寄存器状态均保留。 */

@@ -7,6 +7,10 @@ extern "C" {
 
 #include "main.h"
 
+/* RTC 心跳仅允许不少于十分钟；16 位 CK_SPRE 计数器最大约 18.2 小时。 */
+#define SYS_CONFIG_SLEEP_MIN_SEC 600U
+#define SYS_CONFIG_SLEEP_MAX_SEC 65535U
+
 /* 全局变量声明 */
 extern SysConfig_t g_cfg;
 extern uint32_t   g_last_server_cmd_id;
