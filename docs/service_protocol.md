@@ -192,7 +192,7 @@ of zero degrees: `0=Z+`, `1=Z-`, `2=X+`, `3=X-`, `4=Y+`, `5=Y-`. A PCB lying
 face-up normally uses `Z+`. An edge-up installation uses the corresponding
 signed X or Y axis. SET_MOUNT persists this value in the RTC backup domain.
 
-The production gatekeeper uses a 500 mg default wake-up threshold and a
+The production gatekeeper uses a 750 mg default wake-up threshold and a
 zero-register wake duration. Wake-Up and 6D are both routed to
 the latched, active-high INT1 pin. The established four-step 6D mapping is kept:
 approximately 10/20/30/40-degree installation thresholds map to ST's
@@ -224,7 +224,7 @@ retain enabled so a device can fetch them during its hourly connection window:
   "exp": 1780000000,
   "sleep": 3600,
   "tilt": 30,
-  "wu": 500
+  "wu": 750
 }
 ```
 

@@ -684,7 +684,7 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                               (uint8_t *)&tap_cfg, 1) != 0) return 0;
 
-    /* 3. WAKE-UP：500mg等阈值由wu_reg决定；持续2个52Hz周期再触发。 */
+    /* 3. WAKE-UP：阈值由wu_reg决定；持续2个52Hz周期再触发。 */
     if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
         lsm6ds3tr_c_wkup_dur_set(&imu_ctx,
                                  LSM6DS_WAKE_UP_DURATION) != 0) return 0;

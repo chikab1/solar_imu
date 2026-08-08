@@ -40,7 +40,7 @@ extern "C" {
 /** @brief 可通过维护串口/服务器下发并保存到RTC备份寄存器的运行配置。 */
 typedef struct {
     uint32_t magic;      /**< 配置有效标记；不匹配时恢复出厂值。 */
-    uint16_t wu_mg;      /**< IMU运动唤醒阈值，单位mg，默认500。 */
+    uint16_t wu_mg;      /**< IMU运动唤醒阈值，单位mg，默认750。 */
     uint16_t tilt_deg;   /**< 相对安装零轴的倾角报警阈值，单位度，默认30。 */
     uint32_t sleep_sec;  /**< 无事件时RTC心跳/上报周期，单位秒，默认3600。 */
     uint16_t v_low_mv;   /**< 禁止启动4G的低压熔断阈值，单位mV，默认3550。 */
