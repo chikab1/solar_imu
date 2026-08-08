@@ -102,7 +102,6 @@ extern uint8_t  g_report_source_fallback;
 extern uint8_t  g_report_boot;
 
 /* 启动诊断 */
-extern uint8_t g_iwdg_runs_in_stop;
 extern uint8_t g_imu_ok;
 extern uint8_t g_reset_reason;
 

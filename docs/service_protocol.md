@@ -59,6 +59,7 @@ inter-byte silence, so it cannot consume the next valid frame.
 | MODEM_OFF | `08` | Empty |
 | GET_IMU_DIAG | `09` | Empty |
 | SET_MOUNT | `0A` | `mount_axis:u8` |
+| GET_DEVICE_ID | `0B` | Empty; reads cached IMEI, MCU UID and MQTT up-topic without powering the modem |
 | GET_PITCH | `10` | Empty |
 | GET_ROLL | `11` | Empty |
 | GET_ANGLE | `12` | Empty |
@@ -73,6 +74,19 @@ Angle response data after the status byte:
 The signed values are little-endian and use 0.01 degree units. For example,
 `235` means `+2.35 degrees`, and `-152` means `-1.52 degrees`. A sensor read
 failure returns status `06` with no angle data.
+
+GET_DEVICE_ID response data after the status byte:
+
+`imei_valid:u8, imei:char[15], mcu_uid:u32[3]`, followed by
+`mqtt_up_topic:char[27]` only when `imei_valid=1`.
+
+The command is RAM-only and never powers the modem or issues an AT command.
+`imei_valid=1` means the current MCU power cycle has successfully read a
+15-digit modem IMEI. In that case its response data is 55 bytes (response
+Length `38` including status) and `mqtt_up_topic` is exactly
+`device/<IMEI>/data`. When no IMEI is cached, its response data is 28 bytes
+(response Length `1D` including status), the 15 IMEI bytes are zero and the
+topic is omitted; the 12 UID bytes are always available.
 
 V1.1 pitch and roll use the native LSM6DS sensor coordinate system:
 

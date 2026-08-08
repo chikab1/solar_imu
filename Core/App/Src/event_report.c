@@ -240,11 +240,13 @@ static void Accel_To_Pitch_Roll_Cdeg(const float acc_mg[3],
  * @brief 连续采集3秒IMU，同时可并行执行ML307C开机脉冲和MATREADY监听。
  * @param event 输出事件采样统计，调用前应清零并填好基础元数据。
  * @param start_modem 1并行启动/探测4G；0只采样，不给模组上电。
+ * @param out_dynamic_peak_mg 输出相邻两次加速度向量的最大变化量，单位mg；可为NULL。
  * @return start_modem为1时表示AT握手成功；只采样时固定返回0。
  * @details 每10 ms采样一次，倾角连续超阈值500 ms才设置EVENT_FLAG_TILTED。
  */
 uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
-                                     uint8_t start_modem)
+                                     uint8_t start_modem,
+                                     uint16_t *out_dynamic_peak_mg)
 {
   uint32_t start;
   uint32_t next_sample;
@@ -252,10 +254,14 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
   uint8_t matready_seen = 0U;
   uint8_t first_sample = 1U;
   uint16_t tilt_over_samples = 0U;
+  uint16_t dynamic_peak_mg = 0U;
+  uint8_t has_previous_acc = 0U;
+  float previous_acc[3] = {0.0f, 0.0f, 0.0f};
   int16_t pitch_start_cdeg = 0, pitch_final_cdeg = 0; /**< pitch开始/最终角，本地追踪。 */
   int16_t roll_start_cdeg = 0, roll_final_cdeg = 0;   /**< roll开始/最终角，本地追踪。 */
   float yaw_accum_cdeg = 0.0f;                        /**< yaw净旋转角累积，厘度。 */
 
+  if (out_dynamic_peak_mg != NULL) *out_dynamic_peak_mg = 0U;
   if (event == NULL) return 0U;
   (void)LSM6DS_Set_Active_Mode();
 
@@ -286,6 +292,23 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
         int16_t pitch_cdeg, roll_cdeg;
         float norm = sqrtf(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
         Accel_To_Pitch_Roll_Cdeg(acc, &pitch_cdeg, &roll_cdeg);
+        /* 静止时加速度绝对模长本来就接近1000 mg，不能用于识别冲击。
+         * 相邻采样的三维向量差代表瞬态加速度：慢速倾斜每10 ms变化很小，
+         * 敲击或强振动则会出现明显峰值。 */
+        if (has_previous_acc) {
+          float dx = acc[0] - previous_acc[0];
+          float dy = acc[1] - previous_acc[1];
+          float dz = acc[2] - previous_acc[2];
+          float dynamic_mg = sqrtf(dx * dx + dy * dy + dz * dz);
+          if (dynamic_mg > (float)dynamic_peak_mg) {
+            dynamic_peak_mg = (dynamic_mg >= 65535.0f) ?
+                              65535U : (uint16_t)(dynamic_mg + 0.5f);
+          }
+        }
+        previous_acc[0] = acc[0];
+        previous_acc[1] = acc[1];
+        previous_acc[2] = acc[2];
+        has_previous_acc = 1U;
         if (first_sample) {
           pitch_start_cdeg = pitch_cdeg;
           roll_start_cdeg = roll_cdeg;
@@ -334,16 +357,16 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
   event->tilt_change_cdeg[1] = Clamp_Int16((float)((int32_t)roll_final_cdeg -
                                                    roll_start_cdeg));
   event->tilt_change_cdeg[2] = Clamp_Int16(yaw_accum_cdeg);
+  if (out_dynamic_peak_mg != NULL) *out_dynamic_peak_mg = dynamic_peak_mg;
 
-  /* Active capture masks WU/6D on INT1.  Re-arm immediately after the sample
-   * window instead of leaving the wake path disabled throughout network,
-   * GNSS, MQTT and modem shutdown, which can take tens of seconds.  Any new
-   * IMU edge is latched by EXTI and consumed by Enter_Stop1_Mode afterwards. */
+  /* 采样期间 INT1 的 WU/6D 被临时屏蔽；采样结束立即重新布防，避免在网络、
+   * GNSS、MQTT 和关机期间长时间丢失新事件。新产生的 IMU 边沿由 EXTI 锁存，
+   * 后续在 Enter_Stop1_Mode() 中统一处理。 */
   g_imu_ok = LSM6DS_Set_Sleep_Mode();
 
   if (!start_modem) return 0U;
 
-  /* MATREADY is preferred, but an AT probe is the compatibility fallback. */
+  /* 优先等待 MATREADY；未收到时使用 AT 探测兼容不同模组启动时序。 */
   start = HAL_GetTick();
   do {
     if (ML307C_Send_CMD("AT", "OK", matready_seen ? 1000U : 500U) == 1) return 1U;
@@ -383,6 +406,9 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
   uint8_t sent = 0U;
+  uint8_t impact_confirmed = 0U;
+  uint8_t orientation_confirmed = 0U;
+  uint16_t dynamic_peak_mg = 0U;
   uint8_t wake_report = (uint8_t)(store_current || (wu_flag || d6d_flag));
   uint8_t boot_report = g_report_boot;
   char topic[40];
@@ -395,25 +421,29 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   g_last_report_attached = 0U;
   g_last_report_duration_ms = 0U;
 
-  if (voltage_mv < CRITICAL_VOLTAGE_MV) allow_modem = 0U;
+  /* [TEST] CRITICAL_VOLTAGE_MV 硬截止已禁用，用于测试最低可发送4G数据的电压。
+   * 原逻辑：voltage_mv < 3350mV 时禁止启动4G模组。
+   * 恢复时取消注释下方行即可。 */
+  /* if (voltage_mv < CRITICAL_VOLTAGE_MV) allow_modem = 0U; */
 
   event.voltage_mv = voltage_mv;
   event.reset_reason = g_reset_reason;
   event.timestamp = RTC_Get_Context(&rtc_time, &rtc_date);
   if (rtc_date.Month >= 1U && rtc_date.Month <= 12U && rtc_date.Date >= 1U)
     event.flags |= EVENT_FLAG_TIME_VALID;
+  /* 此处先记录原始硬件唤醒来源；3秒采样后会按最终物理事件重写 IMU 的 w。
+   * 因此 w=3 只表示确认的“倾斜+冲击”，不再表示两个锁存源曾经同时出现。 */
   if (wu_flag && d6d_flag) event.wake_reason = EVENT_WAKE_IMU_BOTH;
   else if (d6d_flag) event.wake_reason = EVENT_WAKE_IMU_6D;
   else if (wu_flag) event.wake_reason = EVENT_WAKE_IMU_WU;
   else if (rtc_flag) event.wake_reason = EVENT_WAKE_RTC;
   else event.wake_reason = EVENT_WAKE_MANUAL;
 
-  /* Every report starts the modem during the 3-second capture window. */
+  /* 所有上报均在约 3 秒采样窗口内并行启动 4G 模组。 */
   modem_ready = Capture_Event_And_Start_Modem(
-      &event, (uint8_t)allow_modem);
+      &event, (uint8_t)allow_modem, &dynamic_peak_mg);
   if (event.sample_count == 0U) event.fail_reason = EVENT_FAIL_INTERNAL;
-  /* If PB1 proved an IMU event but the latched source bits disappeared before
-   * they were read, classify it from the confirmed physical result. */
+  /* PB1 已证明发生过 IMU 唤醒、但读取前来源锁存位消失时，按复核后的物理结果分类。 */
   if (source_fallback) {
     if (event.flags & EVENT_FLAG_TILTED) {
       d6d_flag = 1U;
@@ -427,20 +457,36 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
     else if (d6d_flag)       event.wake_reason = EVENT_WAKE_IMU_6D;
     else                     event.wake_reason = EVENT_WAKE_IMU_WU;
   }
-  /* WAKE_UP is the configured acceleration alarm. A 6D interrupt is a
-   * low-power wake hint and must pass the fixed installation-angle check. */
-  if (wu_flag) event.flags |= EVENT_FLAG_IMPACT;
-  if (event.acc_norm_peak_mg >= (uint16_t)(1000U + g_cfg.wu_mg))
+  /* 6D仅是低功耗唤醒提示，必须通过固定安装轴复核。WAKE-UP同样只作为
+   * 唤醒门铃：单独的锁存WU位不能直接等同撞击，否则传感器上电瞬态、桌面
+   * 微振或旧锁存位都会形成w=1。只有3秒采样窗口内出现不小于配置阈值的
+   * 快速三维加速度变化，才确认冲击。 */
+  if (wu_flag && dynamic_peak_mg >= g_cfg.wu_mg) {
+    impact_confirmed = 1U;
     event.flags |= EVENT_FLAG_IMPACT;
+  }
   if (store_current && d6d_flag &&
       !(event.flags & EVENT_FLAG_TILTED) &&
       (g_last_imu_class & EVENT_FLAG_TILTED)) {
     event.flags |= EVENT_FLAG_RECOVERED;
   }
-  if (store_current && !wu_flag && d6d_flag &&
-      !(event.flags & (EVENT_FLAG_TILTED | EVENT_FLAG_RECOVERED))) {
-    if (g_imu_false_wake_count < 0xFFFFU) g_imu_false_wake_count++;
-    goto report_cleanup;
+  if (wu_flag || d6d_flag) {
+    orientation_confirmed =
+        (event.flags & (EVENT_FLAG_TILTED | EVENT_FLAG_RECOVERED)) ? 1U : 0U;
+
+    /* 原始INT1来源只负责将MCU唤醒；上报类别由采样确认结果决定。
+     * 这避免将“慢速倾斜时WU+6D源先后锁存”误报为w=3/冲击。 */
+    if (orientation_confirmed && impact_confirmed)
+      event.wake_reason = EVENT_WAKE_IMU_BOTH;
+    else if (orientation_confirmed)
+      event.wake_reason = EVENT_WAKE_IMU_6D;
+    else if (impact_confirmed)
+      event.wake_reason = EVENT_WAKE_IMU_WU;
+
+    if (store_current && !orientation_confirmed && !impact_confirmed) {
+      if (g_imu_false_wake_count < 0xFFFFU) g_imu_false_wake_count++;
+      goto report_cleanup;
+    }
   }
   event.severity = (event.flags & EVENT_FLAG_TILTED) ? 3U :
                    ((event.flags & EVENT_FLAG_IMPACT) ? 2U : 1U);
@@ -541,8 +587,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
-  /* The IMU event is now already stored before queue publishing.  Keep the
-   * first GPS result as a lightweight update, then track only real movement. */
+  /* IMU 事件已在队列发布前落盘；首个 GPS 结果作为轻量更新，后续仅跟踪真实位移。 */
   if (wake_report) {
     (void)Track_Wake_GPS(event.event_id, event.timestamp, topic, &event);
   } else {

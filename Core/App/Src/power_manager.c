@@ -40,6 +40,14 @@ float ADC_Get_Battery_Voltage_Avg(void)
   */
 uint8_t Volt_Fuse_Check(float v_avg)
 {
+    /* [TEST] 低电量熔断保护已禁用，用于测试最低可发送4G数据的电压。
+     * 原逻辑：硬熔断阈值 g_cfg.v_low_mv → 禁止启动4G，
+     *         回线恢复阈值 +200mV → 充回安全水位才允许重新开机。
+     * 恢复时取消下方直接 return 并还原原逻辑即可。 */
+    (void)v_avg;
+    g_low_volt_fuse = 0;
+    return 1;
+#if 0
     float cutoff = g_cfg.v_low_mv / 1000.0f;
     float hyst   = (g_cfg.v_low_mv + 200) / 1000.0f;
     if (g_low_volt_fuse == 0) {
@@ -55,4 +63,5 @@ uint8_t Volt_Fuse_Check(float v_avg)
         }
         return 0;
     }
+#endif
 }

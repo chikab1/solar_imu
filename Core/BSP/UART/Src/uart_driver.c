@@ -19,8 +19,7 @@ static uint8_t s_uart1_dma_buf[256];              /**< USART1循环DMA硬件接�
 
 static uint8_t s_uart2_rx_buf[UART2_RX_BUF_SIZE]; /**< 维护协议软件接收环形缓冲。 */
 static uint8_t s_uart2_tx_buf[UART2_TX_BUF_SIZE]; /**< USART2中断发送期间的稳定副本。 */
-/* One maximum service frame is 75 bytes. Keep enough headroom so an entire
- * frame can be received without a full-buffer re-arm gap. */
+/* 单帧维护协议最大 75 字节，预留足够空间，避免整帧接收时出现缓冲重启空档。 */
 static uint8_t s_uart2_it_buf[256];               /**< 单次ReceiveToIdle接收区。 */
 
 UART_Driver_t g_uart1_drv; /**< USART1/ML307C运行状态。 */

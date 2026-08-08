@@ -105,6 +105,7 @@
 | MODEM_OFF | 08 | 88 | 空 | 01 |
 | GET_IMU_DIAG | 09 | 89 | 空 | 16 |
 | SET_MOUNT | 0A | 8A | mount_axis:u8 | 01 |
+| GET_DEVICE_ID | 0B | 8B | 空 | 1D或38 |
 | GET_PITCH | 10 | 90 | 空 | 03 |
 | GET_ROLL | 11 | 91 | 空 | 03 |
 | GET_ANGLE | 12 | 92 | 空 | 05 |
@@ -396,7 +397,40 @@ Payload位置0为status，1为queue_count，2为index，3~54为事件记录。
 
 值大于5返回04；长度不是1返回02。SET_MOUNT影响事件报警零度，但当前三个角度查询返回IMU原生坐标系，不做mount_axis转换。
 
-### 5.11 GET_PITCH（10）
+### 5.11 GET_DEVICE_ID（0B）
+
+作用：只读返回本次上电周期已经缓存的IMEI、STM32 MCU UID和实际MQTT上行主题。不会打开ML307C，不发送AT命令，不产生4G流量。
+
+发送：
+
+~~~text
+55 AA 01 0B 0B 00 00 B3 55 0D 0A
+~~~
+
+IMEI已经缓存时，正常响应形式：
+
+~~~text
+55 AA 01 8B 0B 38 00 00 01 <15字节IMEI ASCII> <12字节MCU UID小端> <27字节Topic ASCII> <CRC> 0D 0A
+~~~
+
+状态字节`00`后的数据结构：
+
+| 偏移 | 类型 | 字段 | 说明 |
+|---:|---|---|---|
+| 0 | u8 | imei_valid | 01=IMEI有效；00=本次上电还未读到IMEI。 |
+| 1 | char[15] | imei | 15位ASCII，不含字符串结束符；无效时全00。 |
+| 16 | u32[3] | mcu_uid | UID三个32位字的小端原始字节，始终有效。 |
+| 28 | char[27] | mqtt_up_topic | 仅IMEI有效时存在，内容为`device/<IMEI>/data`。 |
+
+无缓存IMEI时响应Length为`1D`：
+
+~~~text
+55 AA 01 8B 0B 1D 00 00 00 <15字节00> <12字节MCU UID小端> <CRC> 0D 0A
+~~~
+
+如果当前正在执行完整上报，设备回`05 BUSY`，应在任务完成后重试。IMEI缓存位于RAM，断电或复位后要等一次自动上报或`RUN_REPORT`走到IMEI读取阶段才会再次有效；后续网络或MQTT失败不会清除已经读到的缓存。
+
+### 5.12 GET_PITCH（10）
 
 作用：读取传感器坐标系Pitch，返回i16小端，单位0.01°。
 
@@ -420,7 +454,7 @@ Payload位置0为status，1为queue_count，2为index，3~54为事件记录。
 
 例如 **EB 00** = 235 = +2.35°；**68 FF** 按有符号i16解析为-152 = -1.52°。
 
-### 5.12 GET_ROLL（11）
+### 5.13 GET_ROLL（11）
 
 作用：读取传感器坐标系Roll，返回i16小端，单位0.01°。
 
@@ -442,7 +476,7 @@ Payload位置0为status，1为queue_count，2为index，3~54为事件记录。
 55 AA 01 91 11 03 00 00 00 00 F8 E3 0D 0A
 ~~~
 
-### 5.13 GET_ANGLE（12）
+### 5.14 GET_ANGLE（12）
 
 作用：同时返回Pitch、Roll，均为i16小端，单位0.01°。
 
@@ -471,7 +505,7 @@ pitch = atan2(ax, sqrt(ay² + az²))
 roll  = atan2(ay, sqrt(ax² + az²))
 ~~~
 
-### 5.14 WAKE/READY（7F/FF）
+### 5.15 WAKE/READY（7F/FF）
 
 上位机不发送7F完整帧，只发送单字节00：
 

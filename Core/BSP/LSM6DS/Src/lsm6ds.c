@@ -114,6 +114,10 @@ static stmdev_ctx_t imu_ctx;                 /**< ST寄存器驱动上下文，�
 static uint8_t s_sleep_mode_ready = 0U;      /**< 1表示INT1已清除旧标志并完成Stop1布防。 */
 static const uint8_t imu_addr = (0x6A << 1); /**< 7位地址0x6A转换为HAL使用的8位地址。 */
 
+/* 休眠监测时加速度计为52Hz。WAKE_UP_DUR=2要求Wake-Up滤波结果连续满足约
+ * 2个ODR周期（约38ms），用于滤除手指轻碰和安装件的短促振铃。 */
+#define LSM6DS_WAKE_UP_DURATION 2U
+
 /**
  * @brief ST寄存器驱动的HAL I2C写桥接函数。
  * @param handle 由imu_ctx.handle传入的I2C_HandleTypeDef指针。
@@ -169,9 +173,8 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
     }
 
     /* 软复位 */
-    /* Do not configure the device while SW_RESET is still active.  A fixed
-     * delay hid I2C/reset failures and allowed the following writes to be
-     * silently lost, leaving INT1 unarmed. */
+    /* SW_RESET 未结束前不能继续配置；固定延时会掩盖 I2C/复位故障，并可能导致
+     * 后续寄存器写入丢失，使 INT1 未被正确布防。 */
     if (lsm6ds3tr_c_reset_set(&imu_ctx, PROPERTY_ENABLE) != 0) return 0;
     for (uint8_t attempt = 0U; attempt < 50U; attempt++) {
         HAL_Delay(2U);
@@ -203,15 +206,14 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
     return 1;
 }
 
-/* V1.1 angle reads average a small, fixed number of samples without retaining
- * history. At the sleep-mode 52 Hz ODR, 20 ms allows each read to observe a
- * new accelerometer sample. No IMU register is written by this path. */
+/* V1.1 角度读取固定平均少量样本且不保留历史；休眠模式 ODR 为 52Hz，间隔 20ms
+ * 可取得新加速度样本。本路径不写入任何 IMU 寄存器。 */
 #define IMU_ANGLE_SAMPLE_COUNT       8U
 #define IMU_ANGLE_SAMPLE_DELAY_MS   20U
 #define IMU_ANGLE_VECTOR_SHIFT      12U
 #define IMU_ANGLE_MIN_ABS_SUM_RAW 1024L
 
-/** @brief Return floor(sqrt(value)) using only 32-bit integer operations. */
+/** @brief 仅使用 32 位整数计算并返回 sqrt(value) 的向下取整结果。 */
 static uint32_t IMU_Integer_Sqrt(uint32_t value)
 {
     uint32_t remainder = value;
@@ -231,14 +233,14 @@ static uint32_t IMU_Integer_Sqrt(uint32_t value)
     return result;
 }
 
-/** @brief Signed right shift with defined truncation toward zero. */
+/** @brief 有符号右移，明确按向零截断处理负数。 */
 static int32_t IMU_Shift_Right(int32_t value, uint8_t shift)
 {
     if (value >= 0) return value >> shift;
     return -(int32_t)(((uint32_t)(-value)) >> shift);
 }
 
-/** @brief Fixed-point CORDIC atan2 for x >= 0, returned in 0.01 degree. */
+/** @brief x>=0 时的定点 CORDIC atan2，返回单位为 0.01 度。 */
 static int16_t IMU_Atan2_Cdeg(int32_t y, uint32_t x)
 {
     static const int16_t atan_table_cdeg[14] = {
@@ -280,7 +282,7 @@ static int16_t IMU_Atan2_Cdeg(int32_t y, uint32_t x)
     return (int16_t)angle;
 }
 
-/** @brief Read sensor-coordinate pitch and roll without changing IMU setup. */
+/** @brief 读取传感器坐标系 Pitch/Roll，不改变 IMU 配置。 */
 uint8_t IMU_Get_Angle(int16_t *pitch_cdeg, int16_t *roll_cdeg)
 {
     int32_t sum[3] = {0, 0, 0};
@@ -380,7 +382,7 @@ uint8_t LSM6DS_Set_Active_Mode(void)
 {
     lsm6ds3tr_c_int1_route_t int1_route = {0};
 
-    /* Do not latch another event during capture or modem activity. */
+    /* 采样或模组联网期间不锁存新的 IMU 事件。 */
     if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
     int1_route.int1_wu = 0;
     int1_route.int1_6d = 0;
@@ -401,9 +403,8 @@ uint8_t LSM6DS_Set_Active_Mode(void)
     return 1;
 }
 
-/* Verify the complete wake path instead of trusting only the software cache.
- * Expected sleep registers are CTRL1_XL=52 Hz/2 g, gyro ODR off,
- * TAP_CFG.INTERRUPTS_ENABLE+LIR set, and WU+6D routed to INT1. */
+/* 校验完整唤醒链路而非只信任软件缓存：休眠时应为 CTRL1_XL=52Hz/2g、陀螺仪关闭、
+ * TAP_CFG 的 INTERRUPTS_ENABLE 与 LIR 置位，WU 与 6D 均路由至 INT1。 */
 static uint8_t LSM6DS_Sleep_Config_Is_Valid(void)
 {
     uint8_t ctrl1_xl;
@@ -437,13 +438,11 @@ uint8_t LSM6DS_Set_Sleep_Mode(void)
 {
     lsm6ds3tr_c_int1_route_t int1_route = {0};
 
-    /* Do not clear an event that arrived while already armed for Stop1. */
+    /* 已为 Stop1 布防期间到达的事件不能被清除。 */
     if (s_sleep_mode_ready && LSM6DS_Sleep_Config_Is_Valid()) return 1U;
     s_sleep_mode_ready = 0U;
 
-    /* Keep the proven 52 Hz accelerometer operating point for WU/6D.  The
-     * gyroscope is independent of both embedded functions and can be stopped
-     * until active capture starts. */
+    /* WU/6D 保持已验证的 52Hz 加速度计工作点；陀螺仪与二者独立，可在主动采样前关闭。 */
     if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;
     int1_route.int1_wu = 0;
     int1_route.int1_6d = 0;
@@ -473,7 +472,7 @@ uint8_t LSM6DS_Set_Sleep_Mode(void)
   * @brief  配置唤醒与运动检测
   * @param  threshold: 唤醒阈值（最低 6 位有效）
   * @param  duration: 唤醒持续时间
-  * @retval 1 - success, 0 - failure
+  * @retval 1 成功；0 失败。
   */
 uint8_t LSM6DS_Config_Wakeup(uint8_t threshold, uint8_t duration)
 {
@@ -595,8 +594,7 @@ uint8_t LSM6DS_Config_6D_Wakeup(void)
         return 0;
     }
 
-    /* 3. 6D is a face-orientation detector, not an arbitrary tilt alarm.
-     * Use the 60-degree face-recognition threshold recommended by ST. */
+    /* 3. 6D 是面向识别，不是任意倾角告警；使用 ST 推荐的 60 度面向阈值。 */
     if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, LSM6DS3TR_C_DEG_60) != 0) {
         return 0;
     }
@@ -656,7 +654,7 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     lsm6ds3tr_c_tap_cfg_t tap_cfg;
     lsm6ds3tr_c_sixd_ths_t deg_val;
 
-    /* Any threshold change requires one clean settle/rearm cycle. */
+    /* 任意阈值变更后均需一次完整稳定/重新布防周期。 */
     s_sleep_mode_ready = 0U;
 
     /* ---- WAKE-UP mg → 寄存器值映射 ---- *
@@ -665,9 +663,8 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     uint8_t wu_reg = (uint8_t)(((uint32_t)wu_mg * 10 + 156) / 312);
     if (wu_reg > 63) wu_reg = 63;
 
-    /* Preserve the original four-step 6D angle mapping that was previously
-     * proven on this board. DEG_60 is the normal setting for a 30-degree
-     * installation alarm, followed by an exact MCU angle confirmation. */
+    /* 保留已在本板验证的四步 6D 角度映射。30 度安装告警使用 DEG_60，随后由 MCU
+     * 精确角度复核。 */
     if      (deg_6d <= 15U) deg_val = LSM6DS3TR_C_DEG_80;
     else if (deg_6d <= 25U) deg_val = LSM6DS3TR_C_DEG_70;
     else if (deg_6d <= 35U) deg_val = LSM6DS3TR_C_DEG_60;
@@ -687,11 +684,12 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                               (uint8_t *)&tap_cfg, 1) != 0) return 0;
 
-    /* 3. WAKE-UP: keep the proven GitHub register configuration. */
+    /* 3. WAKE-UP：500mg等阈值由wu_reg决定；持续2个52Hz周期再触发。 */
     if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
-        lsm6ds3tr_c_wkup_dur_set(&imu_ctx, 0) != 0) return 0;
+        lsm6ds3tr_c_wkup_dur_set(&imu_ctx,
+                                 LSM6DS_WAKE_UP_DURATION) != 0) return 0;
 
-    /* 4. 6D orientation detection; relative Tilt remains disabled. */
+    /* 4. 6D 面向检测；相对 Tilt 功能保持关闭。 */
     if (lsm6ds3tr_c_6d_threshold_set(&imu_ctx, deg_val) != 0 ||
         lsm6ds3tr_c_4d_mode_set(&imu_ctx, 0) != 0 ||
         lsm6ds3tr_c_6d_feed_data_set(&imu_ctx,

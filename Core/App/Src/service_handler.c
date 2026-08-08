@@ -53,7 +53,7 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
     response[2] = EventStore_Count();
     response[3] = ML307C_Is_Powered();
     response[4] = g_low_volt_fuse;
-    response[5] = g_iwdg_runs_in_stop;
+    response[5] = 0U;
     Write_LE16(&response[6], g_cfg.v_low_mv);
     Write_LE32(&response[8], g_cfg.sleep_sec);
     response[12] = g_imu_ok;
@@ -142,12 +142,9 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
   case SERVICE_CMD_SLEEP:
     Turn_Off_ML307C();
     g_serial_session_active = 0U;
-    /* Consume the RX-activity indication belonging to this validated SLEEP
-     * frame.  Without this, a frame arriving between the main-loop activity
-     * check and Service_Task() is mistaken for new traffic at the Stop1 race
-     * guard, causing an immediate UART wake and a second READY response.  Any
-     * byte received after this point sets the flag again and still cancels the
-     * sleep transition as intended. */
+    /* 消费本条已校验 SLEEP 帧对应的接收活动标记；否则主循环活动检测与
+     * Service_Task() 之间到达的帧会被误判为新流量，造成刚入 Stop1 又被 UART
+     * 唤醒并重复发送 READY。之后新到达的任意字节仍会重新置位并按设计取消休眠。 */
     {
       uint32_t primask = __get_PRIMASK();
       __disable_irq();
@@ -156,9 +153,12 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
     }
     break;
   case SERVICE_CMD_MODEM_ON: {
+    /* [TEST] 低电量熔断检查已禁用，用于测试最低可发送4G数据的电压。
+     * 原逻辑：Volt_Fuse_Check() 返回0时拒绝开机。
+     * 恢复时还原为: if (!Volt_Fuse_Check(voltage)) status = SERVICE_STATUS_FAILED; */
     float voltage = ADC_Get_Battery_Voltage_Avg();
-    if (!Volt_Fuse_Check(voltage)) status = SERVICE_STATUS_FAILED;
-    else Turn_On_ML307C();
+    (void)voltage;
+    Turn_On_ML307C();
     break;
   }
   case SERVICE_CMD_MODEM_OFF:
@@ -188,6 +188,36 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
       Config_Save();
     }
     break;
+  case SERVICE_CMD_GET_DEVICE_ID: {
+    const char *imei;
+    uint8_t imei_valid;
+
+    if (frame->length != 0U) {
+      status = SERVICE_STATUS_BAD_LENGTH;
+      break;
+    }
+
+    /* 此命令只读取RAM中已缓存的身份信息，绝不打开ML307C或发送AT命令。
+     * MCU UID始终可读；IMEI仅在本次上电周期已经成功读取过时才有效。 */
+    imei = ML307C_Get_IMEI_Str();
+    imei_valid = (ML307C_Has_IMEI() && strlen(imei) == 15U) ? 1U : 0U;
+    response[0] = imei_valid;
+    Write_LE32(&response[16], HAL_GetUIDw0());
+    Write_LE32(&response[20], HAL_GetUIDw1());
+    Write_LE32(&response[24], HAL_GetUIDw2());
+
+    if (imei_valid) {
+      memcpy(&response[1], imei, 15U);
+      memcpy(&response[28], "device/", 7U);
+      memcpy(&response[35], imei, 15U);
+      memcpy(&response[50], "/data", 5U);
+      response_len = 55U;
+    } else {
+      /* response[1..15]保持为0；上位机可据imei_valid提示先完成一次4G上报。 */
+      response_len = 28U;
+    }
+    break;
+  }
   case SERVICE_CMD_GET_PITCH:
   case SERVICE_CMD_GET_ROLL:
   case SERVICE_CMD_GET_ANGLE: {
@@ -266,7 +296,13 @@ void Service_Task(uint8_t busy_only)
   while (ServiceProtocol_GetFrame(&frame)) {
     g_serial_session_active = 1U;
     g_last_uart2_activity = HAL_GetTick();
-    if (busy_only || g_service_busy) {
+    if ((busy_only || g_service_busy) &&
+        frame.command != SERVICE_CMD_GET_STATUS &&
+        frame.command != SERVICE_CMD_GET_IMU_DIAG &&
+        frame.command != SERVICE_CMD_GET_DEVICE_ID &&
+        frame.command != SERVICE_CMD_GET_PITCH &&
+        frame.command != SERVICE_CMD_GET_ROLL &&
+        frame.command != SERVICE_CMD_GET_ANGLE) {
       ServiceProtocol_SendResponse(frame.command, frame.sequence,
                                    SERVICE_STATUS_BUSY, NULL, 0U);
     } else {

@@ -371,7 +371,7 @@ int ML307C_MQTT_PublishEx(char *topic, char *payload, uint8_t dup)
     int n;
     if (topic == NULL || payload == NULL || len <= 0) return 0;
 
-    /* AT command is accepted only after the asynchronous puback arrives. */
+    /* 必须等待异步 PUBACK 到达后，模组才能接受下一条 AT 命令。 */
     n = snprintf(s_at_tx_buf, sizeof(s_at_tx_buf),
                  "AT+MQTTPUB=0,\"%s\",1,0,%u,%d,\"%s\"",
                  topic, (unsigned)(dup ? 1U : 0U), len, payload);
@@ -950,7 +950,7 @@ int ML307C_GPS_Wait_Fix(ML307C_GPS_Data_t *gps_data, uint32_t timeout_ms)
             }
             if (parse_result == ML307C_LOC_PARSE_MALFORMED)
                 gps_data->err_code = ML307C_LOC_ERR_URC;
-            /* NO_FIX is a valid report without a usable fix; keep listening. */
+            /* 无有效定位是正常状态，继续监听后续定位结果。 */
             loc = strstr(loc + 1, "+MGNSSLOC:");
         }
 

@@ -10,12 +10,13 @@ extern "C" {
 /** @brief Flash双缓存最多保存两条未确认送达的事件；索引0始终为最旧事件。 */
 #define EVENT_STORE_MAX_RECORDS 2U
 
-/** @brief 产生事件的唤醒源，数值会直接写入MQTT字段`w`。 */
+/** @brief 最终确认的事件类别，数值会直接写入MQTT字段`w`。
+ * 原始WAKE-UP/6D寄存器来源仅用于唤醒和诊断，不直接作为上报类别。 */
 typedef enum {
     EVENT_WAKE_UNKNOWN = 0, /**< 无法判断唤醒源。 */
-    EVENT_WAKE_IMU_WU,     /**< 加速度Wake-Up中断。 */
-    EVENT_WAKE_IMU_6D,     /**< 6D姿态变化中断。 */
-    EVENT_WAKE_IMU_BOTH,   /**< Wake-Up与6D同时触发。 */
+    EVENT_WAKE_IMU_WU,     /**< 已确认的冲击事件。 */
+    EVENT_WAKE_IMU_6D,     /**< 已确认的倾斜或恢复事件。 */
+    EVENT_WAKE_IMU_BOTH,   /**< 已确认的倾斜且同时存在冲击。 */
     EVENT_WAKE_RTC,        /**< RTC周期心跳。 */
     EVENT_WAKE_MANUAL      /**< 上电或串口人工上报。 */
 } EventWakeReason_t;

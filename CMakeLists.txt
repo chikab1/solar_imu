@@ -52,7 +52,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    ${CMAKE_SOURCE_DIR}/Core/App/Inc
+    ${CMAKE_SOURCE_DIR}/Core/BSP/ML307C/Inc
+    ${CMAKE_SOURCE_DIR}/Core/BSP/LSM6DS/Inc
+    ${CMAKE_SOURCE_DIR}/Core/BSP/UART/Inc
+    ${CMAKE_SOURCE_DIR}/Core/Protocol/Inc
 )
 
 # Add project symbols (macros)
@@ -75,18 +79,19 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # 加入用户自定义的源文件（排除已被stm32cubemx处理的文件）
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/Core/Src/at_ml307c.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/lsm6ds3tr-c_reg.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/uart_driver.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/event_store.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/service_protocol.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/sys_config.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/power_manager.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/rtc_utils.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/service_handler.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/event_report.c
-    ${CMAKE_SOURCE_DIR}/Core/Src/low_power.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/app_controller.c
+    ${CMAKE_SOURCE_DIR}/Core/BSP/ML307C/Src/at_ml307c.c
+    ${CMAKE_SOURCE_DIR}/Core/BSP/LSM6DS/Src/lsm6ds.c
+    ${CMAKE_SOURCE_DIR}/Core/BSP/LSM6DS/Src/lsm6ds3tr-c_reg.c
+    ${CMAKE_SOURCE_DIR}/Core/BSP/UART/Src/uart_driver.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/event_store.c
+    ${CMAKE_SOURCE_DIR}/Core/Protocol/Src/service_protocol.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/sys_config.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/power_manager.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/rtc_utils.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/service_handler.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/event_report.c
+    ${CMAKE_SOURCE_DIR}/Core/App/Src/low_power.c
 )
 
 # 浮点数 printf 已移除 (MQTT/GPS函数已注释，无浮点格式化需求)

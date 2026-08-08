@@ -28,28 +28,26 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c);
 uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps);
 
 /**
- * @brief Read pitch and roll in the native LSM6DS sensor coordinate system.
- * @param pitch_cdeg Output pitch in 0.01 degree, range -9000 to 9000.
- * @param roll_cdeg Output roll in 0.01 degree, range -9000 to 9000.
- * @return 1 on success; 0 on invalid parameters, I2C failure, or invalid
- *         acceleration magnitude.
- * @note V1.1 does not apply mount_axis or any installation-coordinate
- *       transform. This read-only function does not change IMU registers,
- *       Wake-Up, 6D, INT1, or the current power mode.
+ * @brief 读取 LSM6DS 原生传感器坐标系下的 Pitch 和 Roll。
+ * @param pitch_cdeg 输出 Pitch，单位 0.01 度，范围 -9000~9000。
+ * @param roll_cdeg 输出 Roll，单位 0.01 度，范围 -9000~9000。
+ * @return 1 成功；0 参数无效、I2C 失败或加速度模长无效。
+ * @note 本接口不应用 mount_axis 或安装坐标变换；仅读取数据，不改变 IMU 寄存器、
+ *       Wake-Up、6D、INT1 或当前功耗模式。
  */
 uint8_t IMU_Get_Angle(int16_t *pitch_cdeg, int16_t *roll_cdeg);
 
 /**
- * @brief Read sensor-coordinate pitch in 0.01 degree.
- * @param pitch_cdeg Output pitch, range -9000 to 9000.
- * @return 1 on success; 0 on failure.
+ * @brief 读取传感器坐标系 Pitch，单位 0.01 度。
+ * @param pitch_cdeg 输出 Pitch，范围 -9000~9000。
+ * @return 1 成功；0 失败。
  */
 uint8_t IMU_Get_Pitch(int16_t *pitch_cdeg);
 
 /**
- * @brief Read sensor-coordinate roll in 0.01 degree.
- * @param roll_cdeg Output roll, range -9000 to 9000.
- * @return 1 on success; 0 on failure.
+ * @brief 读取传感器坐标系 Roll，单位 0.01 度。
+ * @param roll_cdeg 输出 Roll，范围 -9000~9000。
+ * @return 1 成功；0 失败。
  */
 uint8_t IMU_Get_Roll(int16_t *roll_cdeg);
 
