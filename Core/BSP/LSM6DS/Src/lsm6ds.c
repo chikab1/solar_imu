@@ -443,6 +443,9 @@ uint8_t LSM6DS_Set_Active_Mode(void)
     }
     s_sleep_mode_ready = 0U;
     s_active_mode_ready = 1U;
+
+
+    
     return 1;
 }
 
