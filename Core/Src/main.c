@@ -38,6 +38,9 @@ int main(void)
   MX_ADC1_Init();
 
   App_Init();
+
+  // 此为注释
+
   while (1) {
     App_Run();
   }
