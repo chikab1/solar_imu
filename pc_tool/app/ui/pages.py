@@ -403,7 +403,7 @@ class AboutPage(QWidget):
         title.setObjectName("aboutTitle")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
-        version = QLabel("路牌监测设备维护工具  V1.1.0")
+        version = QLabel("路牌监测设备维护工具  V1.1.1")
         version.setAlignment(Qt.AlignCenter)
         layout.addWidget(version)
         text = QLabel("面向安装、运维和售后人员：查看姿态与六轴数据、设置唤醒参数、检查4G上报及未发送事件。")

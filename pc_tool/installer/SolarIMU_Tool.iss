@@ -1,5 +1,5 @@
 #define MyAppName "Solar IMU 路牌监测工具"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Solar IMU"
 #define MyAppExeName "SolarIMU_Tool.exe"
 
@@ -16,7 +16,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release_dist
-OutputBaseFilename=SolarIMU_Tool_Setup_v1.1.0_Win64
+OutputBaseFilename=SolarIMU_Tool_Setup_v1.1.1_Win64
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -24,7 +24,8 @@ SetupLogging=yes
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
-VersionInfoVersion=1.1.0.0
+UninstallDisplayName=卸载 {#MyAppName}
+VersionInfoVersion=1.1.1.0
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoDescription={#MyAppName} 安装程序
@@ -40,7 +41,9 @@ Source: "..\release_dist\SolarIMU_Tool\*"; DestDir: "{app}"; Flags: ignoreversio
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{app}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent

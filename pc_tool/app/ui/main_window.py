@@ -13,7 +13,7 @@ from .pages import (AboutPage, ConfigPage, LiveAttitudePage, ModemPage,
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Solar IMU 路牌监测工具 V1.1.0")
+        self.setWindowTitle("Solar IMU 路牌监测工具 V1.1.1")
         self.resize(1240, 800)
         self.client = DeviceClient(self)
         self._build_ui()

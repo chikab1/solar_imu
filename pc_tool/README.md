@@ -1,8 +1,8 @@
-# Solar IMU 路牌监测工具 V1.1.0
+# Solar IMU 路牌监测工具 V1.1.1
 
 这是 STM32 路牌监测终端的 Windows 上位机。界面面向安装、运维和售后人员，使用 USART2（115200-8-N-1）读取设备状态、调整唤醒参数并检查 4G 上报。
 
-## V1.1.0 更新
+## V1.1.0 功能更新
 
 - 实时姿态改为 `0.1 / 0.2 / 0.5 / 1 / 2 秒`固定档位。新固件使用 `GET_IMU_LIVE (0x13)` 单次返回六轴与姿态，去掉旧 `GET_ANGLE` 约 150 ms 的八次平均等待。
 - “ML307C”统一改为用户可理解的“4G模块”，设备总览采用电压、网络、传感器和待发送事件卡片。
@@ -43,4 +43,10 @@ $env:PYTHONPATH='.'
 .\build_installer.ps1
 ```
 
-生成文件为 `pc_tool/release_dist/SolarIMU_Tool_Setup_v1.1.0_Win64.exe`。安装包会把主程序和完整 Qt 运行库安装到当前用户目录，并默认创建开始菜单与桌面快捷方式，目标电脑不需要安装 Python、PySide6 或串口库。正式发布前应在没有 Python 环境的 Windows 电脑上验证 CH340 连接、参数写入回读和卸载流程。
+V1.1.1 修复了 V1.1.0 发布包可能混入开发机 Anaconda ICU DLL、导致目标电脑无法加载 QtWidgets 的问题。
+
+生成文件为 `pc_tool/release_dist/SolarIMU_Tool_Setup_v1.1.1_Win64.exe`。安装包会把主程序和完整 Qt 运行库安装到当前用户目录，并默认创建开始菜单与桌面快捷方式；安装目录和开始菜单中也会生成清晰的“卸载 Solar IMU 路牌监测工具”入口。目标电脑不需要安装 Python、PySide6 或串口库。
+
+构建脚本会临时隔离系统 `PATH`，防止开发机上的 Anaconda、Matlab 或其他 Qt 软件把不兼容的 ICU/Qt DLL 混入发布包；构建后还会检查发布目录中是否出现外部 ICU DLL。正式发布前应在没有 Python 环境的 Windows 电脑上验证 CH340 连接、参数写入回读和卸载流程。
+
+安装后可用 `SolarIMU_Tool.exe --smoke-test` 执行发布包自检：程序成功加载 Qt、主题、全部页面和串口模块后会自动以退出码0结束。
