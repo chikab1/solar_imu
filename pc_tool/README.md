@@ -37,4 +37,10 @@ $env:PYTHONPATH='.'
 .\.venv\Scripts\pyinstaller.exe --noconfirm SolarIMU_Tool.spec
 ```
 
-生成目录为 `pc_tool/dist/SolarIMU_Tool/`。正式发布前应在没有 Python 环境的 Windows 电脑上验证 CH340 连接、参数写入回读和安装包启动。
+正式发布使用与 V1.0.1 相同的 Inno Setup 安装包模式：
+
+```powershell
+.\build_installer.ps1
+```
+
+生成文件为 `pc_tool/release_dist/SolarIMU_Tool_Setup_v1.1.0_Win64.exe`。安装包会把主程序和完整 Qt 运行库安装到当前用户目录，并默认创建开始菜单与桌面快捷方式，目标电脑不需要安装 Python、PySide6 或串口库。正式发布前应在没有 Python 环境的 Windows 电脑上验证 CH340 连接、参数写入回读和卸载流程。

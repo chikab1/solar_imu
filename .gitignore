@@ -2,6 +2,7 @@ build/
 pc_tool/.venv/
 pc_tool/venv313/
 pc_tool/.recovered_v101/
+pc_tool/.tools/
 pc_tool/build/
 pc_tool/dist/
 pc_tool/release_build/
