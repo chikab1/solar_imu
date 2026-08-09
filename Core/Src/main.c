@@ -44,7 +44,6 @@ int main(void)
   while (1) {
     App_Run();
   }
-  //test
 }
 
 /**
