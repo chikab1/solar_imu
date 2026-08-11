@@ -8,7 +8,6 @@
 #include "rtc.h"
 #include "at_ml307c.h"
 #include "lsm6ds.h"
-#include "rtc_utils.h"
 #include "low_power.h"
 #include <string.h>
 #include <stdlib.h>
@@ -162,12 +161,8 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
     int val;
     int cmd_id;
     int version;
-    int expires;
     uint8_t updated = 0U;
     uint8_t sleep_changed = 0U;
-    RTC_TimeTypeDef now_time = {0};
-    RTC_DateTypeDef now_date = {0};
-    uint32_t now = RTC_Get_Context(&now_time, &now_date);
 
     if (require_imei) {
         if (!Parse_Json_String(payload, "imei", target_imei, sizeof(target_imei)) ||
@@ -177,8 +172,7 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
 
     if (!Parse_Json_Int(payload, "cmd_id", &cmd_id) || cmd_id <= 0 ||
         !Parse_Json_Int(payload, "ver", &version) || version != 1 ||
-        !Parse_Json_Int(payload, "exp", &expires) || (uint32_t)expires < now ||
-        (uint32_t)cmd_id == g_last_server_cmd_id) return 0U;
+        (uint32_t)cmd_id <= g_last_server_cmd_id) return 0U;
 
     if (Parse_Json_Int(payload, "wu", &val)) {
         if (val < 250 || val > 2000) return 0U;

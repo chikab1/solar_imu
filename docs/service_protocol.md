@@ -232,7 +232,6 @@ retain enabled so a device can fetch them during its hourly connection window:
   "imei": "867926053214567",
   "cmd_id": 123,
   "ver": 1,
-  "exp": 1780000000,
   "sleep": 3600,
   "tilt": 30,
   "wu": 750
@@ -249,7 +248,9 @@ period restarts the RTC period from zero.
 Only the shared `device/settings` topic is used for configuration; the device no
 longer subscribes to a per-device `device/<IMEI>/cmd` topic.
 
-`exp` is a Unix timestamp. Repeated, expired, unsupported, mismatched, or
-out-of-range commands are ignored. Applied commands are persisted in the RTC
-backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using
-`{"cmd_id":123,"ok":1}`.
+`cmd_id` must be a positive, monotonically increasing integer. Commands whose
+`cmd_id` is less than or equal to the last applied ID are ignored, preventing
+both duplicate execution and rollback to older retained settings. Unsupported,
+mismatched, or out-of-range commands are also ignored. Applied settings and the
+latest command ID are persisted in the RTC backup domain and acknowledged with
+QoS 1 on `device/<IMEI>/ack` using `{"cmd_id":123,"ok":1}`.
