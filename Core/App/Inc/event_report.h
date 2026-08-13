@@ -34,6 +34,7 @@ uint8_t  Capture_Event_And_Start_Modem(EventRecord_t *event,
 uint8_t  Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
                           uint8_t rtc_flag, uint8_t manual,
                           uint8_t source_fallback);
+uint8_t  Run_Event_Report_Config_Test(void);
 
 #ifdef __cplusplus
 }

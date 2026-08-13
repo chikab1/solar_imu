@@ -641,3 +641,39 @@ report_cleanup:
   (void)LSM6DS_Set_Sleep_Mode();
   return sent;
 }
+
+/**
+ * @brief 无GPS的MQTT远程配置测试上报。
+ * @return 1测试消息发布且远程配置成功应用，0任一步失败或未应用配置。
+ * @note 只发布固定文本，不写事件队列、不启动GPS、不修改正式上报诊断。
+ */
+uint8_t Run_Event_Report_Config_Test(void)
+{
+  EventRecord_t startup_event = {0};
+  ML307C_Network_Status_t network = {0};
+  char topic[40];
+  uint8_t mqtt_connected = 0U;
+  uint8_t result = 0U;
+  int topic_len;
+
+  if (!Capture_Event_And_Start_Modem(&startup_event, 1U, NULL)) goto cleanup;
+  if (!ML307C_Has_IMEI() && !ML307C_Get_IMEI()) goto cleanup;
+  if (!ML307C_Wait_Network(NETWORK_BUDGET_MS, &network)) goto cleanup;
+  if (ML307C_MQTT_Connect("101.34.217.153", 1883,
+                          "solar_imu", "solar_imu") != 1) goto cleanup;
+  mqtt_connected = 1U;
+
+  topic_len = snprintf(topic, sizeof(topic), "device/%s/data",
+                       ML307C_Get_IMEI_Str());
+  if (topic_len < 0 || (size_t)topic_len >= sizeof(topic)) goto cleanup;
+  if (!ML307C_MQTT_Publish(topic, "ok ready to read ack")) goto cleanup;
+
+  result = Check_MQTT_Settings();
+
+cleanup:
+  if (mqtt_connected)
+    (void)ML307C_Send_CMD("AT+MQTTDISC=0", "OK", 2000U);
+  Turn_Off_ML307C();
+  (void)LSM6DS_Set_Sleep_Mode();
+  return result;
+}

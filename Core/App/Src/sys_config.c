@@ -155,7 +155,7 @@ static uint8_t IMEI_Is_Valid(const char *imei)
 static uint8_t Publish_Config_Ack(int cmd_id, uint8_t ok, uint8_t error_code)
 {
     char ack_topic[48];
-    char ack_payload[64];
+    char ack_payload[112];
     int written;
 
     written = snprintf(ack_topic, sizeof(ack_topic), "device/%s/ack",
@@ -164,11 +164,17 @@ static uint8_t Publish_Config_Ack(int cmd_id, uint8_t ok, uint8_t error_code)
 
     if (ok) {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%d,\"ok\":1}", cmd_id);
+                           "{\"cmd_id\":%d,\"ok\":1,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           cmd_id, (unsigned int)g_cfg.wu_mg,
+                           (unsigned int)g_cfg.tilt_deg,
+                           (unsigned long)g_cfg.sleep_sec);
     } else {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%d,\"ok\":0,\"err\":%u}",
-                           cmd_id, (unsigned int)error_code);
+                           "{\"cmd_id\":%d,\"ok\":0,\"err\":%u,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           cmd_id, (unsigned int)error_code,
+                           (unsigned int)g_cfg.wu_mg,
+                           (unsigned int)g_cfg.tilt_deg,
+                           (unsigned long)g_cfg.sleep_sec);
     }
     if (written < 0 || (size_t)written >= sizeof(ack_payload)) return 0U;
     return (uint8_t)ML307C_MQTT_Publish(ack_topic, ack_payload);

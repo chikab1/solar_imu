@@ -254,12 +254,16 @@ are not applied. Unsupported or out-of-range commands also receive a failure
 ACK when the device has already confirmed the local IMEI and parsed a valid
 `cmd_id`. Applied settings and the latest command ID are persisted in the RTC
 backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using
-`{"cmd_id":123,"ok":1}`.
+`{"cmd_id":123,"ok":1,"wu":750,"tilt":30,"sleep":1800}`.
+
+The `wu`, `tilt`, and `sleep` fields report the configuration currently active
+on the device. A success ACK contains the newly applied values; a failure ACK
+contains the unchanged values that remain active.
 
 Failure ACKs use the same topic and the following format:
 
 ```json
-{"cmd_id":123,"ok":0,"err":5}
+{"cmd_id":123,"ok":0,"err":5,"wu":750,"tilt":30,"sleep":3600}
 ```
 
 The `err` values are:

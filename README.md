@@ -340,13 +340,15 @@ device/<IMEI>/ack
 ACK示例：
 
 ```json
-{"cmd_id":123,"ok":1}
+{"cmd_id":123,"ok":1,"wu":750,"tilt":30,"sleep":1800}
 ```
+
+ACK中的`wu`、`tilt`和`sleep`始终表示设备当前实际生效的加速度阈值、角度阈值和RTC唤醒周期。成功ACK返回应用后的新值；失败ACK返回配置未被修改时仍在使用的当前值。
 
 如果消息已经确认属于本机且`cmd_id`是合法正整数，但后续校验失败，设备会向同一ACK Topic发布失败确认：
 
 ```json
-{"cmd_id":123,"ok":0,"err":5}
+{"cmd_id":123,"ok":0,"err":5,"wu":750,"tilt":30,"sleep":3600}
 ```
 
 `err`错误码如下：
