@@ -223,14 +223,14 @@ longer changes the interrupt routing.
 
 ## MQTT downlink configuration
 
-After a successful RTC heartbeat report, the device subscribes to the shared
-`device/settings` topic. The server should publish the settings with QoS 1 and
-retain enabled so a device can fetch them during its hourly connection window:
+After a successful RTC heartbeat report, the device subscribes to its per-device
+`device/<IMEI>/settings` topic. The server should publish settings with QoS 1;
+retain may be enabled so the device can fetch the latest configuration during its
+next connection window:
 
 ```json
 {
-  "imei": "867926053214567",
-  "cmd_id": 123,
+  "cmd_id": 1760000000,
   "ver": 1,
   "sleep": 3600,
   "tilt": 30,
@@ -238,23 +238,18 @@ retain enabled so a device can fetch them during its hourly connection window:
 }
 ```
 
-`imei` must be exactly 15 decimal digits and match the modem IMEI. Non-matching
-devices silently ignore the shared message. `sleep` accepts 600..65535 seconds
-(default 3600),
-`tilt` accepts 10..90 degrees, and `wu` accepts 250..2000 mg. Partial updates
-are allowed, but at least one settings field must be valid. A changed sleep
-period restarts the RTC period from zero.
+The example `cmd_id` is illustrative only; operational messages must replace it with the real UTC Unix timestamp at publish time.
 
-Only the shared `device/settings` topic is used for configuration; the device no
-longer subscribes to a per-device `device/<IMEI>/cmd` topic.
+because the Topic already identifies the target device. `sleep` accepts
+600..65535 seconds (default 3600), `tilt` accepts 10..90 degrees, and `wu`
+accepts 250..2000 mg. Partial updates are allowed, but at least one settings
+field must be valid. A changed sleep period restarts the RTC period from zero.
 
-`cmd_id` must be a positive, monotonically increasing integer. Commands whose
-`cmd_id` is less than or equal to the last applied ID receive a failure ACK and
-are not applied. Unsupported or out-of-range commands also receive a failure
-ACK when the device has already confirmed the local IMEI and parsed a valid
-`cmd_id`. Applied settings and the latest command ID are persisted in the RTC
-backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using
-`{"cmd_id":123,"ok":1,"wu":750,"tilt":30,"sleep":1800}`.
+Only the per-device `device/<IMEI>/settings` topic is used for configuration; the
+device no longer subscribes to a shared settings topic or a per-device
+`device/<IMEI>/cmd` topic.
+
+`cmd_id` is the UTC Unix timestamp in whole seconds at command creation. The device accepts it only when it is within the inclusive window `now - 7200 <= cmd_id <= now + 7200`, where `now` is the device's current UTC Unix timestamp, and it must be greater than the last applied timestamp. Commands outside the time window receive a failure ACK with `err:8`; duplicate or stale timestamps receive `err:4` and are not applied. The server must use a real current timestamp and should not synthesize `last_id + 1`. Applied settings and the latest command timestamp are persisted in the RTC backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using `{"cmd_id":123,"ok":1,"wu":750,"tilt":30,"sleep":1800}`.
 
 The `wu`, `tilt`, and `sleep` fields report the configuration currently active
 on the device. A success ACK contains the newly applied values; a failure ACK
@@ -263,7 +258,7 @@ contains the unchanged values that remain active.
 Failure ACKs use the same topic and the following format:
 
 ```json
-{"cmd_id":123,"ok":0,"err":5,"wu":750,"tilt":30,"sleep":3600}
+{"cmd_id":1760000000,"ok":0,"err":5,"wu":750,"tilt":30,"sleep":3600}
 ```
 
 The `err` values are:
@@ -276,10 +271,11 @@ The `err` values are:
 | 4 | Duplicate or stale `cmd_id` |
 | 5 | Out-of-range or invalid configuration value |
 | 6 | No setting field to update |
-| 7 | Topic mismatch; no ACK when the message is not `device/settings` |
+| 7 | Topic mismatch; no ACK when the message is not the device's settings Topic |
+| 8 | `cmd_id` outside the device UTC time window of ±7200 seconds |
 
-Subscription failure, receive timeout, malformed publish URC, topic mismatch,
-missing/invalid/non-local IMEI, or missing/invalid `cmd_id` do not produce a
-failure ACK because the device cannot safely associate the response with a
-local command. Rejected commands do not modify the active configuration or the
-last applied command ID.
+Subscription failure, receive timeout, malformed publish URC, a Topic other than the
+exact local `device/<IMEI>/settings`, or missing/invalid `cmd_id` do not produce a
+failure ACK because the device cannot safely associate the response with a local
+command. Rejected commands do not modify the active configuration or the last
+applied command ID.

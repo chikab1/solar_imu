@@ -6,12 +6,14 @@
 #include "sys_config.h"
 #include "main.h"
 #include "rtc.h"
+#include "rtc_utils.h"
 #include "at_ml307c.h"
 #include "lsm6ds.h"
 #include "low_power.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ========================== 全局变量 ========================== */
 
@@ -116,46 +118,43 @@ uint8_t Parse_Json_Int(const char *buf, const char *key, int *out_val)
     return 1;
 }
 
-/** @brief 从简单JSON对象读取一个受长度限制的字符串字段。 */
-static uint8_t Parse_Json_String(const char *buf, const char *key,
-                                 char *out, size_t out_size)
+uint8_t Parse_Json_U32(const char *buf, const char *key, uint32_t *out_val)
 {
-    char pattern[20];
+    char pattern[16];
     const char *p;
-    const char *end;
-    size_t len;
+    uint32_t value = 0U;
 
-    if (buf == NULL || key == NULL || out == NULL || out_size == 0U) return 0U;
+    if (buf == NULL || key == NULL || out_val == NULL) return 0U;
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     p = strstr(buf, pattern);
     if (p == NULL) return 0U;
     p += strlen(pattern);
     while (*p == ' ' || *p == '\t' || *p == ':') p++;
-    if (*p++ != '"') return 0U;
-    end = strchr(p, '"');
-    if (end == NULL) return 0U;
-    len = (size_t)(end - p);
-    if (len == 0U || len + 1U > out_size) return 0U;
-    memcpy(out, p, len);
-    out[len] = '\0';
+    if (*p < '0' || *p > '9') return 0U;
+    while (*p >= '0' && *p <= '9') {
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (UINT32_MAX - digit) / 10U) return 0U;
+        value = value * 10U + digit;
+        p++;
+    }
+    *out_val = value;
     return 1U;
 }
 
-static uint8_t IMEI_Is_Valid(const char *imei)
+static uint8_t Is_Cmd_Timestamp_In_Window(uint32_t cmd_id, uint32_t now)
 {
-    size_t i;
-    if (imei == NULL || strlen(imei) != 15U) return 0U;
-    for (i = 0U; i < 15U; i++) {
-        if (imei[i] < '0' || imei[i] > '9') return 0U;
-    }
-    return 1U;
+    uint32_t lower = (now < SYS_CONFIG_CMD_TIME_WINDOW_SEC) ?
+                     0U : now - SYS_CONFIG_CMD_TIME_WINDOW_SEC;
+    uint32_t upper = (now > UINT32_MAX - SYS_CONFIG_CMD_TIME_WINDOW_SEC) ?
+                     UINT32_MAX : now + SYS_CONFIG_CMD_TIME_WINDOW_SEC;
+    return (cmd_id >= lower && cmd_id <= upper) ? 1U : 0U;
 }
 
 /** @brief 发布远程配置处理结果。 */
-static uint8_t Publish_Config_Ack(int cmd_id, uint8_t ok, uint8_t error_code)
+static uint8_t Publish_Config_Ack(uint32_t cmd_id, uint8_t ok, uint8_t error_code)
 {
     char ack_topic[48];
-    char ack_payload[112];
+    char ack_payload[128];
     int written;
 
     written = snprintf(ack_topic, sizeof(ack_topic), "device/%s/ack",
@@ -164,14 +163,14 @@ static uint8_t Publish_Config_Ack(int cmd_id, uint8_t ok, uint8_t error_code)
 
     if (ok) {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%d,\"ok\":1,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
-                           cmd_id, (unsigned int)g_cfg.wu_mg,
+                           "{\"cmd_id\":%lu,\"ok\":1,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           (unsigned long)cmd_id, (unsigned int)g_cfg.wu_mg,
                            (unsigned int)g_cfg.tilt_deg,
                            (unsigned long)g_cfg.sleep_sec);
     } else {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%d,\"ok\":0,\"err\":%u,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
-                           cmd_id, (unsigned int)error_code,
+                           "{\"cmd_id\":%lu,\"ok\":0,\"err\":%u,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           (unsigned long)cmd_id, (unsigned int)error_code,
                            (unsigned int)g_cfg.wu_mg,
                            (unsigned int)g_cfg.tilt_deg,
                            (unsigned long)g_cfg.sleep_sec);
@@ -190,34 +189,36 @@ static uint8_t Json_Has_Key(const char *buf, const char *key)
 }
 
 /** @brief 原子校验并应用一条服务器配置JSON。 */
-static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
+static uint8_t Apply_Server_Config(const char *payload)
 {
     SysConfig_t next = g_cfg;
-    char target_imei[16];
     int val;
-    int cmd_id;
-    int version;
+    uint32_t cmd_id;
+    uint32_t now;
+    uint32_t version;
     uint8_t updated = 0U;
     uint8_t sleep_changed = 0U;
 
-    if (require_imei) {
-        if (!Parse_Json_String(payload, "imei", target_imei, sizeof(target_imei)) ||
-            !IMEI_Is_Valid(target_imei) ||
-            !ML307C_Has_IMEI() ||
-            strcmp(target_imei, ML307C_Get_IMEI_Str()) != 0) return 0U;
-    }
-
-    /* 没有可靠的正整数cmd_id时不能构造可关联的失败ACK。 */
-    if (!Parse_Json_Int(payload, "cmd_id", &cmd_id) || cmd_id <= 0) return 0U;
-    if (!Parse_Json_Int(payload, "ver", &version)) {
+    /* cmd_id是UTC Unix秒；缺失或溢出时无法安全关联失败ACK。 */
+    if (!Parse_Json_U32(payload, "cmd_id", &cmd_id) || cmd_id == 0U) return 0U;
+    if (!Parse_Json_U32(payload, "ver", &version)) {
         (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
         return 0U;
     }
-    if (version != 1) {
+    if (version != 1U) {
         (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VERSION);
         return 0U;
     }
-    if ((uint32_t)cmd_id <= g_last_server_cmd_id) {
+    {
+        RTC_TimeTypeDef now_time = {0};
+        RTC_DateTypeDef now_date = {0};
+        now = RTC_Get_Context(&now_time, &now_date);
+    }
+    if (!Is_Cmd_Timestamp_In_Window(cmd_id, now)) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_TIME);
+        return 0U;
+    }
+    if (cmd_id <= g_last_server_cmd_id) {
         (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_CMD_ID);
         return 0U;
     }
@@ -260,30 +261,6 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
         sleep_changed = (next.sleep_sec != g_cfg.sleep_sec) ? 1U : 0U;
         updated = 1U;
     }
-    if (!require_imei && Json_Has_Key(payload, "vlow")) {
-        if (!Parse_Json_Int(payload, "vlow", &val)) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
-            return 0U;
-        }
-        if (val < 3500 || val > 4000) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
-            return 0U;
-        }
-        next.v_low_mv = (uint16_t)val;
-        updated = 1U;
-    }
-    if (!require_imei && Json_Has_Key(payload, "mount")) {
-        if (!Parse_Json_Int(payload, "mount", &val)) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
-            return 0U;
-        }
-        if (val < MOUNT_AXIS_Z_POS || val > MOUNT_AXIS_Y_NEG) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
-            return 0U;
-        }
-        next.mount_axis = (uint8_t)val;
-        updated = 1U;
-    }
     if (!updated) {
         (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_NO_UPDATE);
         return 0U;
@@ -301,11 +278,10 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
 }
 
 /**
-  * @brief  检查 MQTT 下行指令窗口 (1500ms)
-  * @note   发布数据后调用. 订阅 device/IMEI/cmd 主题,
-  *         等待 1500ms 捕获 +MQTTURC: "publish" URC.
-  *         若收到 JSON 参数, 更新 g_cfg 并保存到备份寄存器.
-  * @retval 1: 收到并应用了新配置, 0: 无下行指令
+  * @brief 检查 MQTT 下行配置窗口。
+  * @note 发布成功后调用，订阅本机的 device/<IMEI>/settings 主题，
+  *       等待 +MQTTURC: "publish" 并应用配置。
+  * @retval 1: 收到并应用了新配置, 0: 无下行指令或配置无效
   */
 uint8_t Check_MQTT_Downlink(void)
 {
@@ -313,20 +289,30 @@ uint8_t Check_MQTT_Downlink(void)
 }
 
 /**
- * @brief RTC上报完成后从共享settings主题接收本机配置。
- * @note 只有payload中的15位imei与本机完全一致才应用并ACK。
+ * @brief 检查 MQTT 下行配置窗口。
+ * @note 订阅本机专属的 device/<IMEI>/settings 主题，等待配置消息。
  */
 uint8_t Check_MQTT_Settings(void)
 {
+    char settings_topic[48];
+    char subscribe_cmd[80];
     char topic[48];
     char payload[256];
+    int written;
     int receive_result;
 
-    if (ML307C_Send_CMD("AT+MQTTSUB=0,\"device/settings\",1",
-                        "+MQTTURC: \"suback\"", 5000) != 1) return 0U;
+    if (!ML307C_Has_IMEI()) return 0U;
+    written = snprintf(settings_topic, sizeof(settings_topic),
+                       "device/%s/settings", ML307C_Get_IMEI_Str());
+    if (written < 0 || (size_t)written >= sizeof(settings_topic)) return 0U;
+    written = snprintf(subscribe_cmd, sizeof(subscribe_cmd),
+                       "AT+MQTTSUB=0,\"%s\",1", settings_topic);
+    if (written < 0 || (size_t)written >= sizeof(subscribe_cmd)) return 0U;
+    if (ML307C_Send_CMD(subscribe_cmd, "+MQTTURC: \"suback\"", 5000) != 1)
+        return 0U;
     receive_result = ML307C_MQTT_Wait_Publish(topic, sizeof(topic),
                                                payload, sizeof(payload), 3000U);
     if (receive_result != ML307C_MQTT_RX_OK) return 0U;
-    if (strcmp(topic, "device/settings") != 0) return 0U;
-    return Apply_Server_Config(payload, 1U);
+    if (strcmp(topic, settings_topic) != 0) return 0U;
+    return Apply_Server_Config(payload);
 }

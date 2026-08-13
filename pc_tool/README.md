@@ -27,9 +27,43 @@ $env:PYTHONPATH='.'
 .\.venv\Scripts\python.exe -m app.main
 ```
 
-没有硬件时可在连接栏勾选“演示模式”。
+## MQTT远程消息页面
 
-## 测试与打包
+上位机新增“MQTT远程消息”页面，串口连接和 Broker 连接互相独立。Broker 详细设置默认收起，需要时点击“显示 Broker 设置”展开。发布消息和订阅消息区域也可以分别收起。发布消息支持两种模式：`手动文本`保留原来的多行 JSON 编辑器和默认格式；`自动填充`只需要填写加速度阈值 `wu`、倾角阈值 `tilt` 和唤醒/休眠时间 `sleep`，页面会实时生成配置 JSON，并在发布时使用当前真实 UTC Unix 时间戳（秒）作为 `cmd_id`。同一秒内重复发布会被阻止，不会人为加一生成未来时间戳；两种模式的内容分别保存，切换模式不会覆盖手动文本。设备只接受当前时间前后7200秒（含边界）内的 `cmd_id`，因此自动发布前应确保电脑时间和设备RTC已完成校时。页面提供三个独立订阅窗口，默认分别为 `device/+/data`、`device/+/ack` 和空白自定义 Topic。每个窗口都可以单独选择 QoS、订阅或退订、清空历史，并以 MQTTX 风格的连续历史文本展示接收时间、实际 Topic、QoS、Retain 和 Payload。页面可自定义 Broker 地址、端口、用户名、密码和 Client ID，并支持发布/订阅、QoS 0/1/2 和 Retain；这些输入配置会保存到当前用户的 Qt 配置存储中。
+
+固件远程配置使用按设备 Topic：
+
+```text
+device/<IMEI>/settings
+```
+
+配置 Payload 不再包含 `imei`，例如：
+
+```json
+{"cmd_id":1760000000,"ver":1,"wu":750,"tilt":30,"sleep":1800}
+```
+
+观察所有设备上报时可订阅：
+
+```text
+device/+/data
+```
+
+`/device/+/data` 与 `device/+/data` 是两个不同的 MQTT Topic，页面会按用户输入原样订阅，不自动增加或删除前导斜杠。当前开发 Broker 使用明文 1883，量产环境应改用 TLS 和独立设备凭据。
+
+## Conda solarimu环境
+
+```powershell
+conda activate solarimu
+cd D:\.code\solar_imu\pc_tool
+python -m pip install -r requirements.txt
+$env:PYTHONPATH = (Get-Location).Path
+$env:QT_QPA_PLATFORM = 'offscreen'
+python -m unittest discover -s tests -v
+python -m app.main --smoke-test
+```
+
+
 
 ```powershell
 $env:PYTHONPATH='.'

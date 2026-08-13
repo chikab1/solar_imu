@@ -523,6 +523,7 @@ int ML307C_MQTT_Parse_Publish(const char *urc,
                               char *payload, size_t payload_size)
 {
     const char *publish;
+    const char *cursor;
     const char *topic_start;
     const char *topic_end;
     const char *json_start;
@@ -536,9 +537,10 @@ int ML307C_MQTT_Parse_Publish(const char *urc,
     publish = strstr(urc, "+MQTTURC: \"publish\"");
     if (publish == NULL) return ML307C_MQTT_RX_MALFORMED;
 
-    /* OneMO固件在publish URC中以引号包围topic。跳过"publish"后，
-     * 查找第一段以device/开头的引号字符串，兼容中间附带连接ID等字段。 */
-    topic_start = strstr(publish + 20, "\"device/");
+    /* OneMO固件在publish URC中以引号包围topic。跳过publish标记后，
+     * 查找以device/开头的Topic，业务层仍会做完整主题比较。 */
+    cursor = publish + strlen("+MQTTURC: \"publish\"");
+    topic_start = strstr(cursor, "\"device/");
     if (topic_start == NULL) return ML307C_MQTT_RX_MALFORMED;
     topic_start++;
     topic_end = strchr(topic_start, '"');

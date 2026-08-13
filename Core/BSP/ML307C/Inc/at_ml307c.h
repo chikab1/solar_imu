@@ -147,6 +147,7 @@ const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms);
 
 /**
  * @brief 从MQTT publish URC中提取主题和JSON正文。
+ * @note 驱动层提取合法的device/主题；具体settings/data用途由业务层校验。
  * @return ML307C_MQTT_RX_OK、ML307C_MQTT_RX_MALFORMED或ML307C_MQTT_RX_OVERFLOW。
  */
 int ML307C_MQTT_Parse_Publish(const char *urc,
