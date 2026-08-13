@@ -151,13 +151,43 @@ static uint8_t IMEI_Is_Valid(const char *imei)
     return 1U;
 }
 
+/** @brief 发布远程配置处理结果。 */
+static uint8_t Publish_Config_Ack(int cmd_id, uint8_t ok, uint8_t error_code)
+{
+    char ack_topic[48];
+    char ack_payload[64];
+    int written;
+
+    written = snprintf(ack_topic, sizeof(ack_topic), "device/%s/ack",
+                       ML307C_Get_IMEI_Str());
+    if (written < 0 || (size_t)written >= sizeof(ack_topic)) return 0U;
+
+    if (ok) {
+        written = snprintf(ack_payload, sizeof(ack_payload),
+                           "{\"cmd_id\":%d,\"ok\":1}", cmd_id);
+    } else {
+        written = snprintf(ack_payload, sizeof(ack_payload),
+                           "{\"cmd_id\":%d,\"ok\":0,\"err\":%u}",
+                           cmd_id, (unsigned int)error_code);
+    }
+    if (written < 0 || (size_t)written >= sizeof(ack_payload)) return 0U;
+    return (uint8_t)ML307C_MQTT_Publish(ack_topic, ack_payload);
+}
+
+/** @brief 判断简单JSON对象中是否出现指定字段名。 */
+static uint8_t Json_Has_Key(const char *buf, const char *key)
+{
+    char pattern[20];
+    if (buf == NULL || key == NULL) return 0U;
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    return (strstr(buf, pattern) != NULL) ? 1U : 0U;
+}
+
 /** @brief 原子校验并应用一条服务器配置JSON。 */
 static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
 {
     SysConfig_t next = g_cfg;
     char target_imei[16];
-    char ack_topic[48];
-    char ack_payload[48];
     int val;
     int cmd_id;
     int version;
@@ -167,41 +197,91 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
     if (require_imei) {
         if (!Parse_Json_String(payload, "imei", target_imei, sizeof(target_imei)) ||
             !IMEI_Is_Valid(target_imei) ||
+            !ML307C_Has_IMEI() ||
             strcmp(target_imei, ML307C_Get_IMEI_Str()) != 0) return 0U;
     }
 
-    if (!Parse_Json_Int(payload, "cmd_id", &cmd_id) || cmd_id <= 0 ||
-        !Parse_Json_Int(payload, "ver", &version) || version != 1 ||
-        (uint32_t)cmd_id <= g_last_server_cmd_id) return 0U;
+    /* 没有可靠的正整数cmd_id时不能构造可关联的失败ACK。 */
+    if (!Parse_Json_Int(payload, "cmd_id", &cmd_id) || cmd_id <= 0) return 0U;
+    if (!Parse_Json_Int(payload, "ver", &version)) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+        return 0U;
+    }
+    if (version != 1) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VERSION);
+        return 0U;
+    }
+    if ((uint32_t)cmd_id <= g_last_server_cmd_id) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_CMD_ID);
+        return 0U;
+    }
 
-    if (Parse_Json_Int(payload, "wu", &val)) {
-        if (val < 250 || val > 2000) return 0U;
+    if (Json_Has_Key(payload, "wu")) {
+        if (!Parse_Json_Int(payload, "wu", &val)) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            return 0U;
+        }
+        if (val < 250 || val > 2000) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            return 0U;
+        }
         next.wu_mg = (uint16_t)val;
         updated = 1U;
     }
-    if (Parse_Json_Int(payload, "tilt", &val)) {
-        if (val < 10 || val > 90) return 0U;
+    if (Json_Has_Key(payload, "tilt")) {
+        if (!Parse_Json_Int(payload, "tilt", &val)) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            return 0U;
+        }
+        if (val < 10 || val > 90) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            return 0U;
+        }
         next.tilt_deg = (uint16_t)val;
         updated = 1U;
     }
-    if (Parse_Json_Int(payload, "sleep", &val)) {
+    if (Json_Has_Key(payload, "sleep")) {
+        if (!Parse_Json_Int(payload, "sleep", &val)) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            return 0U;
+        }
         if (val < (int)SYS_CONFIG_SLEEP_MIN_SEC ||
-            val > (int)SYS_CONFIG_SLEEP_MAX_SEC) return 0U;
+            val > (int)SYS_CONFIG_SLEEP_MAX_SEC) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            return 0U;
+        }
         next.sleep_sec = (uint32_t)val;
         sleep_changed = (next.sleep_sec != g_cfg.sleep_sec) ? 1U : 0U;
         updated = 1U;
     }
-    if (!require_imei && Parse_Json_Int(payload, "vlow", &val)) {
-        if (val < 3500 || val > 4000) return 0U;
+    if (!require_imei && Json_Has_Key(payload, "vlow")) {
+        if (!Parse_Json_Int(payload, "vlow", &val)) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            return 0U;
+        }
+        if (val < 3500 || val > 4000) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            return 0U;
+        }
         next.v_low_mv = (uint16_t)val;
         updated = 1U;
     }
-    if (!require_imei && Parse_Json_Int(payload, "mount", &val)) {
-        if (val < MOUNT_AXIS_Z_POS || val > MOUNT_AXIS_Y_NEG) return 0U;
+    if (!require_imei && Json_Has_Key(payload, "mount")) {
+        if (!Parse_Json_Int(payload, "mount", &val)) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            return 0U;
+        }
+        if (val < MOUNT_AXIS_Z_POS || val > MOUNT_AXIS_Y_NEG) {
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            return 0U;
+        }
         next.mount_axis = (uint8_t)val;
         updated = 1U;
     }
-    if (!updated) return 0U;
+    if (!updated) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_NO_UPDATE);
+        return 0U;
+    }
 
     g_cfg = next;
     if (sleep_changed) g_guard_sleep_accum_sec = 0U;
@@ -210,12 +290,7 @@ static uint8_t Apply_Server_Config(const char *payload, uint8_t require_imei)
     Config_Save();
     (void)LSM6DS_Config_Gatekeeper(g_cfg.wu_mg, (uint8_t)g_cfg.tilt_deg);
     (void)LSM6DS_Set_Sleep_Mode();
-
-    snprintf(ack_topic, sizeof(ack_topic), "device/%s/ack",
-             ML307C_Get_IMEI_Str());
-    snprintf(ack_payload, sizeof(ack_payload),
-             "{\"cmd_id\":%d,\"ok\":1}", cmd_id);
-    (void)ML307C_MQTT_Publish(ack_topic, ack_payload);
+    (void)Publish_Config_Ack(cmd_id, 1U, 0U);
     return 1U;
 }
 
@@ -239,11 +314,13 @@ uint8_t Check_MQTT_Settings(void)
 {
     char topic[48];
     char payload[256];
+    int receive_result;
 
     if (ML307C_Send_CMD("AT+MQTTSUB=0,\"device/settings\",1",
                         "+MQTTURC: \"suback\"", 5000) != 1) return 0U;
-    if (!ML307C_MQTT_Wait_Publish(topic, sizeof(topic),
-                                   payload, sizeof(payload), 3000U) ||
-        strcmp(topic, "device/settings") != 0) return 0U;
+    receive_result = ML307C_MQTT_Wait_Publish(topic, sizeof(topic),
+                                               payload, sizeof(payload), 3000U);
+    if (receive_result != ML307C_MQTT_RX_OK) return 0U;
+    if (strcmp(topic, "device/settings") != 0) return 0U;
     return Apply_Server_Config(payload, 1U);
 }

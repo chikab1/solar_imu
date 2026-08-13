@@ -140,14 +140,14 @@ void ML307C_Drain_Rx(uint32_t drain_ms);
  */
 const char* ML307C_Wait_URC(const char *expected, uint32_t timeout_ms);
 
+#define ML307C_MQTT_RX_OK             1
+#define ML307C_MQTT_RX_TIMEOUT        0
+#define ML307C_MQTT_RX_MALFORMED     -1
+#define ML307C_MQTT_RX_OVERFLOW      -2
+
 /**
  * @brief 从MQTT publish URC中提取主题和JSON正文。
- * @param urc 包含一条完整`+MQTTURC: "publish"`记录的缓冲区。
- * @param topic 输出主题缓冲区。
- * @param topic_size 主题缓冲区容量。
- * @param payload 输出JSON正文缓冲区。
- * @param payload_size 正文缓冲区容量。
- * @return 1解析成功，0格式不完整或目标缓冲区不足。
+ * @return ML307C_MQTT_RX_OK、ML307C_MQTT_RX_MALFORMED或ML307C_MQTT_RX_OVERFLOW。
  */
 int ML307C_MQTT_Parse_Publish(const char *urc,
                               char *topic, size_t topic_size,
@@ -155,7 +155,7 @@ int ML307C_MQTT_Parse_Publish(const char *urc,
 
 /**
  * @brief 等待并解析一条MQTT publish URC，不丢弃订阅ACK后已到达的数据。
- * @return 1得到完整topic/payload，0超时。
+ * @return ML307C_MQTT_RX_OK、ML307C_MQTT_RX_TIMEOUT、ML307C_MQTT_RX_MALFORMED或ML307C_MQTT_RX_OVERFLOW。
  */
 int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
                              char *payload, size_t payload_size,

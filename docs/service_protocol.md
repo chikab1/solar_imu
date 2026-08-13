@@ -249,8 +249,33 @@ Only the shared `device/settings` topic is used for configuration; the device no
 longer subscribes to a per-device `device/<IMEI>/cmd` topic.
 
 `cmd_id` must be a positive, monotonically increasing integer. Commands whose
-`cmd_id` is less than or equal to the last applied ID are ignored, preventing
-both duplicate execution and rollback to older retained settings. Unsupported,
-mismatched, or out-of-range commands are also ignored. Applied settings and the
-latest command ID are persisted in the RTC backup domain and acknowledged with
-QoS 1 on `device/<IMEI>/ack` using `{"cmd_id":123,"ok":1}`.
+`cmd_id` is less than or equal to the last applied ID receive a failure ACK and
+are not applied. Unsupported or out-of-range commands also receive a failure
+ACK when the device has already confirmed the local IMEI and parsed a valid
+`cmd_id`. Applied settings and the latest command ID are persisted in the RTC
+backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using
+`{"cmd_id":123,"ok":1}`.
+
+Failure ACKs use the same topic and the following format:
+
+```json
+{"cmd_id":123,"ok":0,"err":5}
+```
+
+The `err` values are:
+
+| `err` | Meaning |
+|---:|---|
+| 1 | Receive/subscription failure; no ACK when no command can be associated |
+| 2 | JSON or field format error |
+| 3 | Unsupported protocol version |
+| 4 | Duplicate or stale `cmd_id` |
+| 5 | Out-of-range or invalid configuration value |
+| 6 | No setting field to update |
+| 7 | Topic mismatch; no ACK when the message is not `device/settings` |
+
+Subscription failure, receive timeout, malformed publish URC, topic mismatch,
+missing/invalid/non-local IMEI, or missing/invalid `cmd_id` do not produce a
+failure ACK because the device cannot safely associate the response with a
+local command. Rejected commands do not modify the active configuration or the
+last applied command ID.

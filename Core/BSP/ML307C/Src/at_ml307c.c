@@ -531,32 +531,34 @@ int ML307C_MQTT_Parse_Publish(const char *urc,
     size_t payload_len;
 
     if (urc == NULL || topic == NULL || topic_size == 0U ||
-        payload == NULL || payload_size == 0U) return 0;
+        payload == NULL || payload_size == 0U) return ML307C_MQTT_RX_MALFORMED;
 
     publish = strstr(urc, "+MQTTURC: \"publish\"");
-    if (publish == NULL) return 0;
+    if (publish == NULL) return ML307C_MQTT_RX_MALFORMED;
 
     /* OneMO固件在publish URC中以引号包围topic。跳过"publish"后，
      * 查找第一段以device/开头的引号字符串，兼容中间附带连接ID等字段。 */
     topic_start = strstr(publish + 20, "\"device/");
-    if (topic_start == NULL) return 0;
+    if (topic_start == NULL) return ML307C_MQTT_RX_MALFORMED;
     topic_start++;
     topic_end = strchr(topic_start, '"');
-    if (topic_end == NULL) return 0;
+    if (topic_end == NULL) return ML307C_MQTT_RX_MALFORMED;
 
     json_start = strchr(topic_end + 1, '{');
     json_end = (json_start != NULL) ? strrchr(json_start, '}') : NULL;
-    if (json_start == NULL || json_end == NULL || json_end < json_start) return 0;
+    if (json_start == NULL || json_end == NULL || json_end < json_start)
+        return ML307C_MQTT_RX_MALFORMED;
 
     topic_len = (size_t)(topic_end - topic_start);
     payload_len = (size_t)(json_end - json_start + 1);
-    if (topic_len + 1U > topic_size || payload_len + 1U > payload_size) return 0;
+    if (topic_len + 1U > topic_size || payload_len + 1U > payload_size)
+        return ML307C_MQTT_RX_OVERFLOW;
 
     memcpy(topic, topic_start, topic_len);
     topic[topic_len] = '\0';
     memcpy(payload, json_start, payload_len);
     payload[payload_len] = '\0';
-    return 1;
+    return ML307C_MQTT_RX_OK;
 }
 
 int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
@@ -569,15 +571,21 @@ int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
         uint16_t avail;
         uint16_t space;
         uint16_t to_read;
+        int parse_result;
 
         HAL_IWDG_Refresh(&hiwdg);
         ML307C_Background_Poll();
-        if (ML307C_MQTT_Parse_Publish((const char *)s_uart_rx_buf,
-                                      topic, topic_size,
-                                      payload, payload_size)) return 1;
+        parse_result = ML307C_MQTT_Parse_Publish((const char *)s_uart_rx_buf,
+                                                  topic, topic_size,
+                                                  payload, payload_size);
+        if (parse_result == ML307C_MQTT_RX_OK) return ML307C_MQTT_RX_OK;
 
         avail = UART_Available(&g_uart1_drv);
-        space = ML307C_MAX_BUF_SIZE - s_rx_buf_len - 1U;
+        if (s_rx_buf_len >= ML307C_MAX_BUF_SIZE - 1U) {
+            space = 0U;
+        } else {
+            space = ML307C_MAX_BUF_SIZE - s_rx_buf_len - 1U;
+        }
         to_read = (avail < space) ? avail : space;
         if (to_read > 0U) {
             s_rx_buf_len += UART_Read(&g_uart1_drv,
@@ -586,7 +594,13 @@ int ML307C_MQTT_Wait_Publish(char *topic, size_t topic_size,
         }
         HAL_Delay(5U);
     }
-    return 0;
+
+    if (strstr((const char *)s_uart_rx_buf, "+MQTTURC: \"publish\"") != NULL) {
+        if (s_rx_buf_len >= ML307C_MAX_BUF_SIZE - 1U)
+            return ML307C_MQTT_RX_OVERFLOW;
+        return ML307C_MQTT_RX_MALFORMED;
+    }
+    return ML307C_MQTT_RX_TIMEOUT;
 }
 
 
