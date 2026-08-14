@@ -26,7 +26,7 @@
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
-#define NETWORK_BUDGET_MS      240000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
+#define NETWORK_BUDGET_MS      20000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
 #define GNSS_FIRST_FIX_TIMEOUT_MS  60000U  /* 4G重新上电后的首次冷启动搜星至少预留1分钟。 */
 #define BOOT_GNSS_FIX_TIMEOUT_MS  180000U  /* 程序启动首次搜星最多等待3分钟。 */
 #define GPS_SAMPLE_TIMEOUT_MS     3000U  /* 同一次上电周期内后续搜星通常很快，单次等待3秒。 */
