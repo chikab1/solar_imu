@@ -26,12 +26,12 @@
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
-#define NETWORK_BUDGET_MS      20000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
+#define NETWORK_BUDGET_MS      20000U /* 等待蜂窝网络注册和数据附着的总预算20秒。 */
 #define GNSS_FIRST_FIX_TIMEOUT_MS  60000U  /* 4G重新上电后的首次冷启动搜星至少预留1分钟。 */
 #define BOOT_GNSS_FIX_TIMEOUT_MS  180000U  /* 程序启动首次搜星最多等待3分钟。 */
 #define GPS_SAMPLE_TIMEOUT_MS     3000U  /* 同一次上电周期内后续搜星通常很快，单次等待3秒。 */
 #define GPS_TRACK_INTERVAL_MS   3000U /* GPS持续跟踪检测与上报周期。 */
-#define GPS_STILL_DISTANCE_M    10.0f /* 位置变化不超过10米视为静止。 */
+#define GPS_STILL_DISTANCE_M     5.0f /* 位置变化不超过5米视为静止。 */
 #define GPS_STILL_SAMPLE_COUNT  3U /* 连续三次静止后关闭4G。 */
 #define EVENT_COOLDOWN_SEC      30U
 #define REPORT_STAGE_IDLE        0U
@@ -625,8 +625,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_DOWNLINK;
-  if (sent && rtc_flag) (void)Check_MQTT_Settings();
-  else if (sent && !wake_report) (void)Check_MQTT_Downlink();
+  if (sent && !wake_report) (void)Check_MQTT_Settings();
   /* 网络失败不创建额外RTC重试；未确认事件保留在Flash双缓存，下次心跳/事件时补发。 */
 
 report_cleanup:
@@ -640,40 +639,4 @@ report_cleanup:
   g_last_report_duration_ms = HAL_GetTick() - report_start;
   (void)LSM6DS_Set_Sleep_Mode();
   return sent;
-}
-
-/**
- * @brief 无GPS的MQTT远程配置测试上报。
- * @return 1测试消息发布且远程配置成功应用，0任一步失败或未应用配置。
- * @note 只发布固定文本，不写事件队列、不启动GPS、不修改正式上报诊断。
- */
-uint8_t Run_Event_Report_Config_Test(void)
-{
-  EventRecord_t startup_event = {0};
-  ML307C_Network_Status_t network = {0};
-  char topic[40];
-  uint8_t mqtt_connected = 0U;
-  uint8_t result = 0U;
-  int topic_len;
-
-  if (!Capture_Event_And_Start_Modem(&startup_event, 1U, NULL)) goto cleanup;
-  if (!ML307C_Has_IMEI() && !ML307C_Get_IMEI()) goto cleanup;
-  if (!ML307C_Wait_Network(NETWORK_BUDGET_MS, &network)) goto cleanup;
-  if (ML307C_MQTT_Connect("101.34.217.153", 1883,
-                          "solar_imu", "solar_imu") != 1) goto cleanup;
-  mqtt_connected = 1U;
-
-  topic_len = snprintf(topic, sizeof(topic), "device/%s/data",
-                       ML307C_Get_IMEI_Str());
-  if (topic_len < 0 || (size_t)topic_len >= sizeof(topic)) goto cleanup;
-  if (!ML307C_MQTT_Publish(topic, "ok ready to read ack")) goto cleanup;
-
-  result = Check_MQTT_Settings();
-
-cleanup:
-  if (mqtt_connected)
-    (void)ML307C_Send_CMD("AT+MQTTDISC=0", "OK", 2000U);
-  Turn_Off_ML307C();
-  (void)LSM6DS_Set_Sleep_Mode();
-  return result;
 }

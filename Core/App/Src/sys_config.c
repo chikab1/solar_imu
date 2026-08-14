@@ -151,7 +151,8 @@ static uint8_t Is_Cmd_Timestamp_In_Window(uint32_t cmd_id, uint32_t now)
 }
 
 /** @brief 发布远程配置处理结果。 */
-static uint8_t Publish_Config_Ack(uint32_t cmd_id, uint8_t ok, uint8_t error_code)
+static uint8_t Publish_Config_Ack(uint32_t cmd_id, uint8_t ok,
+                                  uint8_t error_code, uint32_t now)
 {
     char ack_topic[48];
     char ack_payload[128];
@@ -163,17 +164,19 @@ static uint8_t Publish_Config_Ack(uint32_t cmd_id, uint8_t ok, uint8_t error_cod
 
     if (ok) {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%lu,\"ok\":1,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           "{\"cmd_id\":%lu,\"ok\":1,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu,\"ts\":%lu}",
                            (unsigned long)cmd_id, (unsigned int)g_cfg.wu_mg,
                            (unsigned int)g_cfg.tilt_deg,
-                           (unsigned long)g_cfg.sleep_sec);
+                           (unsigned long)g_cfg.sleep_sec,
+                           (unsigned long)now);
     } else {
         written = snprintf(ack_payload, sizeof(ack_payload),
-                           "{\"cmd_id\":%lu,\"ok\":0,\"err\":%u,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu}",
+                           "{\"cmd_id\":%lu,\"ok\":0,\"err\":%u,\"wu\":%u,\"tilt\":%u,\"sleep\":%lu,\"ts\":%lu}",
                            (unsigned long)cmd_id, (unsigned int)error_code,
                            (unsigned int)g_cfg.wu_mg,
                            (unsigned int)g_cfg.tilt_deg,
-                           (unsigned long)g_cfg.sleep_sec);
+                           (unsigned long)g_cfg.sleep_sec,
+                           (unsigned long)now);
     }
     if (written < 0 || (size_t)written >= sizeof(ack_payload)) return 0U;
     return (uint8_t)ML307C_MQTT_Publish(ack_topic, ack_payload);
@@ -201,35 +204,35 @@ static uint8_t Apply_Server_Config(const char *payload)
 
     /* cmd_id是UTC Unix秒；缺失或溢出时无法安全关联失败ACK。 */
     if (!Parse_Json_U32(payload, "cmd_id", &cmd_id) || cmd_id == 0U) return 0U;
-    if (!Parse_Json_U32(payload, "ver", &version)) {
-        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
-        return 0U;
-    }
-    if (version != 1U) {
-        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VERSION);
-        return 0U;
-    }
     {
         RTC_TimeTypeDef now_time = {0};
         RTC_DateTypeDef now_date = {0};
         now = RTC_Get_Context(&now_time, &now_date);
     }
+    if (!Parse_Json_U32(payload, "ver", &version)) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT, now);
+        return 0U;
+    }
+    if (version != 1U) {
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VERSION, now);
+        return 0U;
+    }
     if (!Is_Cmd_Timestamp_In_Window(cmd_id, now)) {
-        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_TIME);
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_TIME, now);
         return 0U;
     }
     if (cmd_id <= g_last_server_cmd_id) {
-        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_CMD_ID);
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_CMD_ID, now);
         return 0U;
     }
 
     if (Json_Has_Key(payload, "wu")) {
         if (!Parse_Json_Int(payload, "wu", &val)) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT, now);
             return 0U;
         }
         if (val < 250 || val > 2000) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE, now);
             return 0U;
         }
         next.wu_mg = (uint16_t)val;
@@ -237,11 +240,11 @@ static uint8_t Apply_Server_Config(const char *payload)
     }
     if (Json_Has_Key(payload, "tilt")) {
         if (!Parse_Json_Int(payload, "tilt", &val)) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT, now);
             return 0U;
         }
         if (val < 10 || val > 90) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE, now);
             return 0U;
         }
         next.tilt_deg = (uint16_t)val;
@@ -249,12 +252,12 @@ static uint8_t Apply_Server_Config(const char *payload)
     }
     if (Json_Has_Key(payload, "sleep")) {
         if (!Parse_Json_Int(payload, "sleep", &val)) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_FORMAT, now);
             return 0U;
         }
         if (val < (int)SYS_CONFIG_SLEEP_MIN_SEC ||
             val > (int)SYS_CONFIG_SLEEP_MAX_SEC) {
-            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE);
+            (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_VALUE, now);
             return 0U;
         }
         next.sleep_sec = (uint32_t)val;
@@ -262,7 +265,7 @@ static uint8_t Apply_Server_Config(const char *payload)
         updated = 1U;
     }
     if (!updated) {
-        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_NO_UPDATE);
+        (void)Publish_Config_Ack(cmd_id, 0U, SYS_CONFIG_ERR_NO_UPDATE, now);
         return 0U;
     }
 
@@ -273,19 +276,8 @@ static uint8_t Apply_Server_Config(const char *payload)
     Config_Save();
     (void)LSM6DS_Config_Gatekeeper(g_cfg.wu_mg, (uint8_t)g_cfg.tilt_deg);
     (void)LSM6DS_Set_Sleep_Mode();
-    (void)Publish_Config_Ack(cmd_id, 1U, 0U);
+    (void)Publish_Config_Ack(cmd_id, 1U, 0U, now);
     return 1U;
-}
-
-/**
-  * @brief 检查 MQTT 下行配置窗口。
-  * @note 发布成功后调用，订阅本机的 device/<IMEI>/settings 主题，
-  *       等待 +MQTTURC: "publish" 并应用配置。
-  * @retval 1: 收到并应用了新配置, 0: 无下行指令或配置无效
-  */
-uint8_t Check_MQTT_Downlink(void)
-{
-    return Check_MQTT_Settings();
 }
 
 /**

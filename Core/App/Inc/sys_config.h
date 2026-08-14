@@ -33,7 +33,6 @@ void    Config_Load(void);
 void    Config_Save(void);
 uint8_t Parse_Json_Int(const char *buf, const char *key, int *out_val);
 uint8_t Parse_Json_U32(const char *buf, const char *key, uint32_t *out_val);
-uint8_t Check_MQTT_Downlink(void);
 uint8_t Check_MQTT_Settings(void);
 
 #ifdef __cplusplus

@@ -144,9 +144,10 @@ register decoding. Wake-up/6D source bits classify the event as reasons 1, 2,
 or 3; if PB1 woke the MCU but both source bits have already cleared, the event
 is conservatively reported as reason 1 and `imu_source_fallback_count` rises.
 
-The default RTC heartbeat remains one hour. Its cellular communication budget is
-240 seconds and it waits up to 180 seconds for a GNSS fix before publishing the
-full report. A timeout is published as `loc:"Err1"` and `err:7`.
+The default RTC heartbeat remains one hour. Its cellular registration and data
+attachment budget is 20 seconds and it waits up to 180 seconds for a GNSS fix
+before publishing the full report. A timeout is published as `loc:"Err1"` and
+`err:7`.
 
 A single GNSS fix is started in this exact order:
 
@@ -175,9 +176,11 @@ An IMU wake publishes its full event JSON first, deliberately omitting both
 ```
 
 A failed fix uses `loc:"Err0".."Err3"` and `err:7`. After the first fix, the
-device samples and publishes location every three seconds. Three consecutive
-moves of at most 10 metres relative to the previous valid fix close the modem;
-a move over 10 metres clears the still counter and keeps GPS/MQTT active.
+device samples location every three seconds and publishes an update only after a
+move over the configured threshold. Three consecutive
+moves of at most 5 metres relative to the previous valid fix close the modem;
+a move over 5 metres sends a GPS update, clears the still counter, and keeps
+GPS/MQTT active.
 
 The MQTT `loc` array remains the compatibility format
 `[latitude*10000, longitude*10000, satellites]`. This carries approximately
@@ -249,16 +252,20 @@ Only the per-device `device/<IMEI>/settings` topic is used for configuration; th
 device no longer subscribes to a shared settings topic or a per-device
 `device/<IMEI>/cmd` topic.
 
-`cmd_id` is the UTC Unix timestamp in whole seconds at command creation. The device accepts it only when it is within the inclusive window `now - 7200 <= cmd_id <= now + 7200`, where `now` is the device's current UTC Unix timestamp, and it must be greater than the last applied timestamp. Commands outside the time window receive a failure ACK with `err:8`; duplicate or stale timestamps receive `err:4` and are not applied. The server must use a real current timestamp and should not synthesize `last_id + 1`. Applied settings and the latest command timestamp are persisted in the RTC backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using `{"cmd_id":123,"ok":1,"wu":750,"tilt":30,"sleep":1800}`.
+`cmd_id` is the UTC Unix timestamp in whole seconds at command creation. The device accepts it only when it is within the inclusive window `now - 7200 <= cmd_id <= now + 7200`, where `now` is the device's current UTC Unix timestamp, and it must be greater than the last applied timestamp. Commands outside the time window receive a failure ACK with `err:8`; duplicate or stale timestamps receive `err:4` and are not applied. The server must use a real current timestamp and should not synthesize `last_id + 1`. Applied settings and the latest command timestamp are persisted in the RTC backup domain and acknowledged with QoS 1 on `device/<IMEI>/ack` using `{"cmd_id":123,"ok":1,"ts":1760000051,"wu":750,"tilt":30,"sleep":1800}`.
 
 The `wu`, `tilt`, and `sleep` fields report the configuration currently active
 on the device. A success ACK contains the newly applied values; a failure ACK
-contains the unchanged values that remain active.
+contains the unchanged values that remain active. `ts` is the device's 32-bit
+UTC Unix timestamp (seconds) at the moment the ACK is generated, distinct from
+`cmd_id` (command creation time). It is only meaningful after the device has
+synced its RTC with `AT+CCLK`; before that the RTC still holds the factory
+default and both the `cmd_id` time window check and `ts` would be wrong.
 
 Failure ACKs use the same topic and the following format:
 
 ```json
-{"cmd_id":1760000000,"ok":0,"err":5,"wu":750,"tilt":30,"sleep":3600}
+{"cmd_id":1760000000,"ok":0,"err":5,"ts":1760000051,"wu":750,"tilt":30,"sleep":3600}
 ```
 
 The `err` values are:

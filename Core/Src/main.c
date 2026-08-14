@@ -16,18 +16,8 @@
 #include "rtc.h"
 #include "usart.h"
 #include "app_controller.h"
-#include "event_report.h"
 
 void SystemClock_Config(void);
-
-#ifndef EVENT_REPORT_CONFIG_TEST
-#define EVENT_REPORT_CONFIG_TEST 1
-#endif
-
-#if EVENT_REPORT_CONFIG_TEST
-/* 1=测试消息发布且远程配置成功应用，0=流程失败或未收到有效配置。 */
-static volatile uint8_t g_remote_config_test_result = 0U;
-#endif
 
 /**
  * @brief 完成硬件初始化后交给应用层调度。
@@ -49,16 +39,9 @@ int main(void)
 
   App_Init();
 
-#if EVENT_REPORT_CONFIG_TEST
-  g_remote_config_test_result = Run_Event_Report_Config_Test();
-  while (1) {
-    HAL_IWDG_Refresh(&hiwdg);
-  }
-#else
   while (1) {
     App_Run();
   }
-#endif
 }
 
 /**
