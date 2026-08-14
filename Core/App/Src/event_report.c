@@ -26,12 +26,12 @@
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
 #define IMU_SOURCE_SETTLE_MS   2U
-#define NETWORK_BUDGET_MS      240000U /* 等待蜂窝/MQTTX通讯的总预算4分钟。 */
+#define NETWORK_BUDGET_MS      20000U /* 等待蜂窝网络注册和数据附着的总预算20秒。 */
 #define GNSS_FIRST_FIX_TIMEOUT_MS  60000U  /* 4G重新上电后的首次冷启动搜星至少预留1分钟。 */
 #define BOOT_GNSS_FIX_TIMEOUT_MS  180000U  /* 程序启动首次搜星最多等待3分钟。 */
 #define GPS_SAMPLE_TIMEOUT_MS     3000U  /* 同一次上电周期内后续搜星通常很快，单次等待3秒。 */
 #define GPS_TRACK_INTERVAL_MS   3000U /* GPS持续跟踪检测与上报周期。 */
-#define GPS_STILL_DISTANCE_M    10.0f /* 位置变化不超过10米视为静止。 */
+#define GPS_STILL_DISTANCE_M     5.0f /* 位置变化不超过5米视为静止。 */
 #define GPS_STILL_SAMPLE_COUNT  3U /* 连续三次静止后关闭4G。 */
 #define EVENT_COOLDOWN_SEC      30U
 #define REPORT_STAGE_IDLE        0U
@@ -625,8 +625,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_DOWNLINK;
-  if (sent && rtc_flag) (void)Check_MQTT_Settings();
-  else if (sent && !wake_report) (void)Check_MQTT_Downlink();
+  if (sent && !wake_report) (void)Check_MQTT_Settings();
   /* 网络失败不创建额外RTC重试；未确认事件保留在Flash双缓存，下次心跳/事件时补发。 */
 
 report_cleanup:

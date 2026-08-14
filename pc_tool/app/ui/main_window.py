@@ -5,7 +5,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel
     QStackedWidget, QVBoxLayout, QWidget)
 
 from app.device_client import DeviceClient
+from app.mqtt_client import MqttClient
 from app.protocol.commands import STATUS_TEXT, Status
+from .mqtt_page import MqttPage
 from .pages import (AboutPage, ConfigPage, LiveAttitudePage, ModemPage,
                     OverviewPage, SerialPage, SixAxisPage)
 
@@ -16,6 +18,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Solar IMU 路牌监测工具 V1.1.1")
         self.resize(1240, 800)
         self.client = DeviceClient(self)
+        self.mqtt_client = MqttClient(self)
         self._build_ui()
         self.client.connected.connect(self._connected)
         self.client.disconnected.connect(self._disconnected)
@@ -68,6 +71,7 @@ class MainWindow(QMainWindow):
             ("4G与上报", ModemPage(self.client)),
             ("六轴数据", SixAxisPage(self.client)),
             ("通信记录", SerialPage(self.client)),
+            ("MQTT远程消息", MqttPage(self.mqtt_client)),
             ("关于", AboutPage()),
         ]
         for title, page in pages:
@@ -135,5 +139,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"命令 0x{command:02X}：{text}", 6000)
 
     def closeEvent(self, event):
+        self.mqtt_client.close()
         self.client.disconnect_device()
         super().closeEvent(event)

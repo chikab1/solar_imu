@@ -39,8 +39,6 @@ int main(void)
 
   App_Init();
 
-  // 此为注释
-
   while (1) {
     App_Run();
   }
