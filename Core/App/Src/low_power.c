@@ -18,7 +18,7 @@
 
 /* ========================== 私有宏 ========================== */
 
-#define IMU_SOURCE_SETTLE_MS   2U
+#define IMU_SOURCE_SETTLE_MS   25U
 
 /* ========================== 全局变量 ========================== */
 
@@ -54,6 +54,7 @@ uint8_t  g_imu_source_fallback_count = 0U;     /**< INT1有效但源寄存器已
 uint8_t IMU_Drain_INT1_Latch(uint8_t *out_wu, uint8_t *out_6d)
 {
   uint8_t wu = 0U, d6d = 0U;
+  uint8_t snapshot_taken = 0U;
 
   if (out_wu != NULL) *out_wu = 0U;
   if (out_6d != NULL) *out_6d = 0U;
@@ -62,9 +63,12 @@ uint8_t IMU_Drain_INT1_Latch(uint8_t *out_wu, uint8_t *out_6d)
     wu = 0U;
     d6d = 0U;
     LSM6DS_Clear_All_Interrupts_Ex(&wu, &d6d);
-    if (attempt == 0U) {
+    /* 取第一个非空来源快照。后续读取仅用于释放锁存，不能把两个时刻的
+     * 不同来源合并成同一次 WU+6D 事件。 */
+    if (!snapshot_taken && (wu || d6d)) {
       if (out_wu != NULL) *out_wu = wu;
       if (out_6d != NULL) *out_6d = d6d;
+      snapshot_taken = 1U;
     }
     HAL_Delay(2U);
     if (HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
@@ -326,9 +330,8 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   g_imu_exti_wakeup_flag = 0U;
   __enable_irq();
   if (imu_exti_event && !wu_flag && !d6d_flag) {
-    /* PB1 是 IMU 唤醒 MCU 的直接证据；来源寄存器仅用于分类，不能据此丢弃事件。
-     * 最终 WU/6D 分类在 3 秒采样复核后修正。 */
-    wu_flag = 1U;
+    /* PB1 是 IMU 唤醒 MCU 的直接证据；来源寄存器仅用于分类。来源丢失时
+     * 保持 unknown，3 秒姿态复核确认倾角后才按 6D 上报，绝不伪造 WU。 */
     source_fallback = 1U;
     if (g_imu_source_fallback_count < 0xFFU)
       g_imu_source_fallback_count++;

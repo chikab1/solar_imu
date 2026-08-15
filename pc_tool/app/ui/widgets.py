@@ -1,7 +1,8 @@
 from collections import deque
+from math import cos, radians, sin
 
 from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 
@@ -74,3 +75,110 @@ class LineChart(QWidget):
                 points.append(QPointF(x, y))
             painter.setPen(QPen(color, 2))
             painter.drawPolyline(points)
+
+
+class AttitudePreview3D(QWidget):
+    """A perspective preview driven only by the available Pitch and Roll."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(360)
+        self.pitch = 0.0
+        self.roll = 0.0
+
+    def set_attitude(self, pitch: float, roll: float):
+        self.pitch = pitch
+        self.roll = roll
+        self.update()
+
+    def _transform(self, x, y, z):
+        # The sensor frame is rotated 90 degrees from the board artwork:
+        # visual_pitch = device_roll, visual_roll = -device_pitch.
+        pitch = radians(self.roll)
+        roll = radians(-self.pitch)
+        y_pitch = y * cos(pitch) - z * sin(pitch)
+        z_pitch = y * sin(pitch) + z * cos(pitch)
+        x_roll = x * cos(roll) + z_pitch * sin(roll)
+        z_roll = -x * sin(roll) + z_pitch * cos(roll)
+        return x_roll, y_pitch, z_roll
+
+    def _project(self, x, y, z, rect):
+        x_roll, y_pitch, z_roll = self._transform(x, y, z)
+        perspective = 1.0 / max(0.55, 1.0 - z_roll * 0.18)
+        scale = min(rect.width() / 4.4, rect.height() / 3.0)
+        return QPointF(rect.center().x() + x_roll * scale * perspective,
+                       rect.center().y() - y_pitch * scale * perspective)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f8fbff"))
+        rect = self.rect().adjusted(18, 18, -18, -18)
+        painter.setPen(QPen(QColor("#cbdbea"), 1))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(rect, 10, 10)
+
+        horizon_y = rect.center().y()
+        painter.setPen(QPen(QColor("#d8e6f3"), 1, Qt.DashLine))
+        painter.drawLine(rect.left() + 18, horizon_y, rect.right() - 18, horizon_y)
+        painter.setPen(QColor("#6f8398"))
+        painter.drawText(rect.left() + 16, rect.top() + 27, "3D 姿态预览")
+        painter.setPen(QColor("#8a9caf"))
+        painter.drawText(rect.right() - 100, rect.top() + 27, "Pitch / Roll")
+
+        half_x, half_y, half_z = 1.18, 0.76, 0.38
+        def face(points):
+            polygon = QPolygonF([self._project(x, y, z, rect) for x, y, z in points])
+            depth = sum(self._transform(x, y, z)[2] for x, y, z in points) / len(points)
+            return depth, polygon
+
+        # Distinct enclosure faces and depth ordering make the direction readable.
+        faces = (
+            (QColor("#174f78"), ((-half_x, -half_y, -half_z), (half_x, -half_y, -half_z),
+                                   (half_x, half_y, -half_z), (-half_x, half_y, -half_z))),
+            (QColor("#1d638f"), ((-half_x, -half_y, -half_z), (-half_x, -half_y, half_z),
+                                   (-half_x, half_y, half_z), (-half_x, half_y, -half_z))),
+            (QColor("#247eaf"), ((half_x, -half_y, -half_z), (half_x, -half_y, half_z),
+                                  (half_x, half_y, half_z), (half_x, half_y, -half_z))),
+            (QColor("#206891"), ((-half_x, -half_y, -half_z), (half_x, -half_y, -half_z),
+                                   (half_x, -half_y, half_z), (-half_x, -half_y, half_z))),
+            (QColor("#4d9ed0"), ((-half_x, half_y, -half_z), (half_x, half_y, -half_z),
+                                  (half_x, half_y, half_z), (-half_x, half_y, half_z))),
+            (QColor("#d7eaf5"), ((-half_x, -half_y, half_z), (half_x, -half_y, half_z),
+                                  (half_x, half_y, half_z), (-half_x, half_y, half_z))),
+        )
+        painter.setPen(QPen(QColor("#0b3f62"), 2))
+        for color, points in sorted(faces, key=lambda item: face(item[1])[0]):
+            painter.setBrush(color)
+            painter.drawPolygon(face(points)[1])
+
+        def draw_axis(name, vector, color):
+            origin = self._project(0.0, 0.0, half_z + 0.03, rect)
+            end = self._project(vector[0], vector[1], half_z + 0.03 + vector[2], rect)
+            painter.setPen(QPen(color, 3))
+            painter.drawLine(origin, end)
+            dx, dy = end.x() - origin.x(), end.y() - origin.y()
+            length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+            nx, ny = -dy / length, dx / length
+            back_x, back_y = end.x() - dx / length * 10, end.y() - dy / length * 10
+            painter.setBrush(color)
+            painter.drawPolygon(QPolygonF([
+                end, QPointF(back_x + nx * 4, back_y + ny * 4),
+                QPointF(back_x - nx * 4, back_y - ny * 4),
+            ]))
+            painter.setPen(color)
+            painter.drawText(end.x() + 5, end.y() - 4, name)
+
+        # Sensor-frame axes: X red, Y green, Z blue.
+        draw_axis("X", (0.82, 0.0, 0.0), QColor("#df4a4a"))
+        draw_axis("Y", (0.0, 0.72, 0.0), QColor("#36a96d"))
+        draw_axis("Z", (0.0, 0.0, 0.72), QColor("#2d77d1"))
+
+        painter.setPen(QColor("#31516c"))
+        painter.drawText(rect.left() + 16, rect.bottom() - 18,
+                         f"Pitch  {self.pitch:+.2f}°")
+        painter.drawText(rect.center().x() - 45, rect.bottom() - 18,
+                         f"Roll  {self.roll:+.2f}°")
+        painter.setPen(QColor("#7d91a5"))
+        painter.drawText(rect.right() - 158, rect.bottom() - 18,
+                         "Yaw unavailable")

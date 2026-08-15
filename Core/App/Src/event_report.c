@@ -26,7 +26,6 @@
 #define IMU_ACTIVE_SETTLE_FRAMES 20U /* 20 x 10ms = 200ms */
 #define TILT_CONFIRM_TIME_MS   500U
 #define TILT_CONFIRM_SAMPLES  (TILT_CONFIRM_TIME_MS / IMU_SAMPLE_PERIOD_MS)
-#define IMU_SOURCE_SETTLE_MS   2U
 #define NETWORK_BUDGET_MS      20000U /* 等待蜂窝网络注册和数据附着的总预算20秒。 */
 #define GNSS_FIRST_FIX_TIMEOUT_MS  60000U  /* 4G重新上电后的首次冷启动搜星至少预留1分钟。 */
 #define BOOT_GNSS_FIX_TIMEOUT_MS  180000U  /* 程序启动首次搜星最多等待3分钟。 */
@@ -378,7 +377,8 @@ uint8_t Capture_Event_And_Start_Modem(EventRecord_t *event,
  */
 uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
                         uint8_t rtc_flag, uint8_t manual,
-                        uint8_t source_fallback)
+                        uint8_t source_fallback,
+                        uint8_t include_gps)
 {
   EventRecord_t event = {0};
   EventRecord_t queued;
@@ -390,7 +390,8 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   float voltage = ADC_Get_Battery_Voltage_Avg();
   uint16_t voltage_mv = (voltage > 0.0f) ? (uint16_t)(voltage * 1000.0f + 0.5f) : 0U;
   uint8_t allow_modem = Volt_Fuse_Check(voltage);
-  uint8_t store_current = (!manual && !rtc_flag && (wu_flag || d6d_flag));
+  uint8_t store_current = (!manual && !rtc_flag &&
+                           (wu_flag || d6d_flag || source_fallback));
   uint8_t current_stored = 0U;
   uint8_t modem_ready;
   uint8_t mqtt_connected = 0U;
@@ -398,6 +399,7 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   uint8_t impact_confirmed = 0U;
   uint8_t orientation_confirmed = 0U;
   uint8_t wake_report = (uint8_t)(store_current || (wu_flag || d6d_flag));
+  uint8_t request_location = include_gps ? 1U : 0U;
   uint8_t boot_report = g_report_boot;
   char topic[40];
   uint32_t report_start = HAL_GetTick();
@@ -431,17 +433,23 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   if (event.sample_count == 0U) event.fail_reason = EVENT_FAIL_INTERNAL;
   /* PB1 已证明发生过 IMU 唤醒、但读取前来源锁存位消失时，按复核后的物理结果分类。 */
   if (source_fallback) {
-    /* INT1已证明发生IMU事件但来源寄存器已清空：按WU处理；若姿态复核通过，
-     * 同时保留6D分类。 */
-    wu_flag = 1U;
+    /* Do not turn a lost source into a WU event.  Only a confirmed posture
+     * transition is allowed to classify this unknown INT1 wake as 6D. */
+    wu_flag = 0U;
     if (event.flags & EVENT_FLAG_TILTED) {
       d6d_flag = 1U;
+    } else if (store_current && (g_last_imu_class & EVENT_FLAG_TILTED)) {
+      d6d_flag = 1U;
+      event.flags |= EVENT_FLAG_RECOVERED;
     } else {
       d6d_flag = 0U;
     }
-    if (wu_flag && d6d_flag) event.wake_reason = EVENT_WAKE_IMU_BOTH;
-    else if (d6d_flag)       event.wake_reason = EVENT_WAKE_IMU_6D;
-    else                     event.wake_reason = EVENT_WAKE_IMU_WU;
+    event.wake_reason = d6d_flag ? EVENT_WAKE_IMU_6D : EVENT_WAKE_UNKNOWN;
+  }
+  if (source_fallback && !wu_flag && !d6d_flag) {
+    if (store_current && g_imu_false_wake_count < 0xFFFFU)
+      g_imu_false_wake_count++;
+    goto report_cleanup;
   }
   /* 产品策略：WAKE-UP来源不再经过软件动态峰值二次确认，直接作为运动事件。
    * 主动采样切换后的20帧/200ms已被丢弃，不会写入遥测数据。 */
@@ -571,10 +579,11 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   }
 
   g_last_report_stage = REPORT_STAGE_LOCATION;
-  /* IMU 事件已在队列发布前落盘；首个 GPS 结果作为轻量更新，后续仅跟踪真实位移。 */
-  if (wake_report) {
+  /* 用户取消GPS时不启动GNSS，且即时上报省略位置字段。IMU自动事件仍始终
+   * 请求位置并在主事件后持续跟踪。 */
+  if (request_location && wake_report) {
     (void)Track_Wake_GPS(event.event_id, event.timestamp, topic, &event);
-  } else {
+  } else if (request_location) {
     if (ML307C_GPS_Start()) {
       if (!ML307C_GPS_Wait_Fix(&gps, boot_report ? BOOT_GNSS_FIX_TIMEOUT_MS :
                                                     GNSS_FIRST_FIX_TIMEOUT_MS)) {
@@ -598,10 +607,16 @@ uint8_t Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
   /* 心跳和人工请求不会写入Flash；旧队列清空后才发送这条临时的新消息。 */
   if (!current_stored) {
     g_last_report_stage = REPORT_STAGE_PUBLISH;
-    sent = ML307C_Send_EventReport(&event, &gps, &lbs,
-                                   2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
-                                   rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
-                                   topic, 0U);
+    if (request_location) {
+      sent = ML307C_Send_EventReport(&event, &gps, &lbs,
+                                     2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
+                                     rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds,
+                                     topic, 0U);
+    } else {
+      sent = ML307C_Send_EventReport_WithoutLocation(
+          &event, 2000 + rtc_date.Year, rtc_date.Month, rtc_date.Date,
+          rtc_time.Hours, rtc_time.Minutes, rtc_time.Seconds, topic, 0U);
+    }
     if (!sent) {
       event.fail_reason = EVENT_FAIL_MQTT_PUBACK;
       goto report_cleanup;

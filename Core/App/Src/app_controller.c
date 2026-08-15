@@ -35,6 +35,7 @@ uint8_t g_report_wu = 0U;
 uint8_t g_report_6d = 0U;
 uint8_t g_report_rtc = 0U;
 uint8_t g_report_source_fallback = 0U;
+uint8_t g_report_include_gps = 1U;
 uint8_t g_report_boot = 0U;
 uint8_t g_imu_ok = 0U;
 uint8_t g_reset_reason = 0U;
@@ -85,15 +86,19 @@ static void App_Run_Pending_Report(void)
   uint8_t d6d = g_report_6d;
   uint8_t rtc = g_report_rtc;
   uint8_t source_fallback = g_report_source_fallback;
+  uint8_t include_gps = g_report_include_gps;
 
   g_report_wu = 0U;
   g_report_6d = 0U;
   g_report_rtc = 0U;
   g_report_source_fallback = 0U;
+  /* 手动请求的选择仅作用于本次任务；自动唤醒始终保留位置跟踪。 */
+  g_report_include_gps = 1U;
   g_pending_cmd = CMD_NONE;
   g_service_busy = 1U;
-  (void)Run_Event_Report(wu, d6d, rtc, (uint8_t)(!wu && !d6d && !rtc),
-                         source_fallback);
+  (void)Run_Event_Report(wu, d6d, rtc,
+                         (uint8_t)(!wu && !d6d && !rtc && !source_fallback),
+                         source_fallback, include_gps);
   g_report_boot = 0U;
   g_service_busy = 0U;
   if (g_serial_session_active) g_last_uart2_activity = HAL_GetTick();
@@ -116,11 +121,12 @@ static void App_Enter_Stop_When_Idle(void)
     g_last_uart2_activity = HAL_GetTick();
     ServiceProtocol_SendWakeAck();
   }
-  if (wu || d6d || rtc) {
+  if (wu || d6d || rtc || fallback) {
     g_report_wu = wu;
     g_report_6d = d6d;
     g_report_rtc = rtc;
     g_report_source_fallback = fallback;
+    g_report_include_gps = 1U;
     g_pending_cmd = CMD_TEST;
   }
 }

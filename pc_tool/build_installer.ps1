@@ -74,4 +74,4 @@ if (-not $Iscc -or -not (Test-Path -LiteralPath $Iscc)) {
 & $Iscc ".\installer\SolarIMU_Tool.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup构建失败" }
 
-Write-Host "安装包已生成：release_dist\SolarIMU_Tool_Setup_v1.1.1_Win64.exe"
+Write-Host "安装包已生成：release_dist\SolarIMU_Tool_Setup_v1.2.0_Win64.exe"

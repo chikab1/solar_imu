@@ -14,6 +14,7 @@ class Command(IntEnum):
     GET_IMU_DIAG = 0x09
     SET_MOUNT = 0x0A
     GET_DEVICE_ID = 0x0B
+    GET_NETWORK_STATUS = 0x0C
     GET_PITCH = 0x10
     GET_ROLL = 0x11
     GET_ANGLE = 0x12
@@ -52,3 +53,8 @@ def config_payload(wu_mg: int, tilt_deg: int, sleep_sec: int, vlow_mv: int) -> b
     if not 3500 <= vlow_mv <= 4000:
         raise ValueError("低电压阈值必须为3.50~4.00 V")
     return struct.pack("<HHIH", wu_mg, tilt_deg, sleep_sec, vlow_mv)
+
+
+def report_payload(include_gps: bool) -> bytes:
+    """Encode the one-shot report option: 1 collects GNSS, 0 skips it."""
+    return bytes((1 if include_gps else 0,))

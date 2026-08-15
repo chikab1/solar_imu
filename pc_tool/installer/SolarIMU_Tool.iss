@@ -1,5 +1,5 @@
 #define MyAppName "Solar IMU 路牌监测工具"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Solar IMU"
 #define MyAppExeName "SolarIMU_Tool.exe"
 
@@ -16,7 +16,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release_dist
-OutputBaseFilename=SolarIMU_Tool_Setup_v1.1.1_Win64
+OutputBaseFilename=SolarIMU_Tool_Setup_v1.2.0_Win64
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -25,7 +25,7 @@ CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName=卸载 {#MyAppName}
-VersionInfoVersion=1.1.1.0
+VersionInfoVersion=1.2.0.0
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoDescription={#MyAppName} 安装程序

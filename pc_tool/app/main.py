@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from app.ui.main_window import MainWindow
@@ -10,6 +11,9 @@ from app.ui.main_window import MainWindow
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Solar IMU Tool")
+    icon = Path(__file__).resolve().parent / "ui" / "assets" / "hdu_logo.png"
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     theme = Path(__file__).resolve().parent / "ui" / "theme.qss"
     if theme.exists():
         app.setStyleSheet(theme.read_text(encoding="utf-8"))

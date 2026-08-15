@@ -115,9 +115,9 @@ static uint8_t s_sleep_mode_ready = 0U;      /**< 1表示INT1已清除旧标志�
 static uint8_t s_active_mode_ready = 0U;     /**< 1表示六轴已在104Hz主动采样模式。 */
 static const uint8_t imu_addr = (0x6A << 1); /**< 7位地址0x6A转换为HAL使用的8位地址。 */
 
-/* 休眠监测时加速度计为52Hz。WAKE_UP_DUR=2要求Wake-Up滤波结果连续满足约
- * 2个ODR周期（约38ms），用于滤除手指轻碰和安装件的短促振铃。 */
-#define LSM6DS_WAKE_UP_DURATION 2U
+/* 休眠监测时加速度计为52Hz。WAKE_UP_DUR=0不额外延迟触发，
+ * 由硬件Wake-Up阈值直接决定唤醒。 */
+#define LSM6DS_WAKE_UP_DURATION 0U
 
 /**
  * @brief ST寄存器驱动的HAL I2C写桥接函数。
@@ -759,7 +759,7 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                               (uint8_t *)&tap_cfg, 1) != 0) return 0;
 
-    /* 3. WAKE-UP：阈值由wu_reg决定；持续2个52Hz周期再触发。 */
+    /* 3. WAKE-UP：阈值由wu_reg决定；持续时间为0，不额外延迟触发。 */
     if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
         lsm6ds3tr_c_wkup_dur_set(&imu_ctx,
                                  LSM6DS_WAKE_UP_DURATION) != 0) return 0;

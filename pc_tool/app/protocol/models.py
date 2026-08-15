@@ -47,6 +47,20 @@ class DeviceStatus:
 
 
 @dataclass
+class NetworkStatus:
+    modem_on: bool
+    attached: bool
+    csq: int
+
+    @classmethod
+    def parse(cls, data: bytes):
+        if len(data) != 3:
+            raise ValueError(f"GET_NETWORK_STATUS长度应为3，实际{len(data)}")
+        modem_on, attached, csq = data
+        return cls(bool(modem_on), bool(attached), csq)
+
+
+@dataclass
 class ImuDiagnostic:
     registers: tuple[int, ...]
     mount_axis: int

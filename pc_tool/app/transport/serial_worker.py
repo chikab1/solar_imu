@@ -6,7 +6,6 @@ from PySide6.QtCore import QThread, Signal
 
 from app.protocol.codec import FrameParser, encode_frame
 from app.protocol.commands import Command
-from .simulator import Simulator
 
 
 class SerialWorker(QThread):
@@ -16,17 +15,26 @@ class SerialWorker(QThread):
     error = Signal(str)
     traffic = Signal(str, object)
 
-    def __init__(self, port: str, baudrate: int = 115200, simulator: bool = False):
+    def __init__(self, port: str, baudrate: int = 115200):
         super().__init__()
         self.port = port
         self.baudrate = baudrate
-        self.simulator = simulator
         self.requests = Queue()
         self.stop_event = threading.Event()
         self.sequence = 1
 
     def request(self, command: int, payload: bytes = b""):
         self.requests.put((int(command), bytes(payload)))
+
+    @staticmethod
+    def _command_timeout(command: int) -> float:
+        # 开关4G会等待PWRKEY脉冲或安全关机；网络快照需要两条AT查询。
+        return {
+            Command.MODEM_ON: 5.0,
+            Command.MODEM_OFF: 11.0,
+            Command.SLEEP: 11.0,
+            Command.GET_NETWORK_STATUS: 5.0,
+        }.get(Command(command), 2.0)
 
     def shutdown(self):
         self.stop_event.set()
@@ -35,18 +43,14 @@ class SerialWorker(QThread):
     def run(self):
         transport = None
         try:
-            if self.simulator:
-                transport = Simulator()
-                transport.open()
-            else:
-                import serial
-                transport = serial.Serial(None, self.baudrate, timeout=0.05, write_timeout=1)
-                transport.dtr = False
-                transport.rts = False
-                transport.port = self.port
-                transport.open()
-                time.sleep(0.2)
-                self._wake(transport)
+            import serial
+            transport = serial.Serial(None, self.baudrate, timeout=0.05, write_timeout=1)
+            transport.dtr = False
+            transport.rts = False
+            transport.port = self.port
+            transport.open()
+            time.sleep(0.2)
+            self._wake(transport)
             self.connected.emit()
             while not self.stop_event.is_set():
                 try:
@@ -56,10 +60,8 @@ class SerialWorker(QThread):
                 if item is None:
                     break
                 command, payload = item
-                if self.simulator:
-                    status, data = transport.transact(command, payload)
-                else:
-                    status, data = self._transact(transport, command, payload)
+                status, data = self._transact(
+                    transport, command, payload, self._command_timeout(command))
                 self.response.emit(command, status, data)
         except Exception as exc:
             self.error.emit(str(exc))

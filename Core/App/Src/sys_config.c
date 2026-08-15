@@ -23,7 +23,7 @@ uint32_t g_last_server_cmd_id = 0;         /**< 已执行的最新服务器命�
 /* ========================== 私有宏 ========================== */
 
 #define CFG_MAGIC             0x55AA55ACU /**< RTC备份配置有效标记。 */
-#define CFG_DEFAULT_WU_MG     750         /**< 默认运动唤醒阈值，mg。 */
+#define CFG_DEFAULT_WU_MG     500         /**< 默认运动唤醒阈值，mg。 */
 #define CFG_DEFAULT_TILT_DEG  30          /**< 默认倾角报警阈值，度。 */
 #define CFG_DEFAULT_SLEEP_SEC 3600        /**< 默认周期心跳间隔，秒。 */
 #define CFG_DEFAULT_V_LOW_MV  3550        /**< 默认4G低压熔断阈值，mV。 */

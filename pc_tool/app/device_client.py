@@ -10,6 +10,7 @@ class DeviceClient(QObject):
     response = Signal(int, int, object)
     error = Signal(str)
     traffic = Signal(str, object)
+    request_queued = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -19,9 +20,9 @@ class DeviceClient(QObject):
     def is_connected(self):
         return bool(self.worker and self.worker.isRunning())
 
-    def connect_device(self, port: str, simulator: bool = False):
+    def connect_device(self, port: str):
         self.disconnect_device()
-        self.worker = SerialWorker(port, simulator=simulator)
+        self.worker = SerialWorker(port)
         # QThread子类对象本身属于主线程；明确使用DirectConnection，确保
         # run()内发出的Python对象信号先进入中继，再由Qt排队给界面接收者。
         self.worker.connected.connect(self._on_connected, Qt.DirectConnection)
@@ -61,11 +62,25 @@ class DeviceClient(QObject):
             self.worker.wait(2500)
             self.worker = None
 
+    def ensure_connected(self):
+        """Return whether the serial device is usable, showing one common hint.
+
+        Pages that issue multiple commands for one click must call this once
+        before starting their batch, so a disconnected device never produces a
+        dialog for every individual command.
+        """
+        if self.is_connected:
+            return True
+        self.error.emit("请先连接设备")
+        return False
+
     def request(self, command: int, payload: bytes = b""):
-        if not self.worker:
-            self.error.emit("请先连接设备")
-            return
+        if not self.ensure_connected():
+            return False
         self.worker.request(command, payload)
+        self.request_queued.emit(int(command))
+        return True
 
     def set_config(self, wu_mg: int, tilt_deg: int, sleep_sec: int, vlow_mv: int):
-        self.request(Command.SET_CONFIG, config_payload(wu_mg, tilt_deg, sleep_sec, vlow_mv))
+        return self.request(Command.SET_CONFIG,
+                            config_payload(wu_mg, tilt_deg, sleep_sec, vlow_mv))
