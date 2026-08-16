@@ -18,7 +18,35 @@
 
 /* ========================== 私有宏 ========================== */
 
-#define IMU_SOURCE_SETTLE_MS   25U
+#define IMU_SOURCE_SETTLE_MS   2U
+
+/* Shared by ISR callbacks and the Stop1 transaction. */
+static void WakePending_Set(uint32_t sources)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_wake_pending |= sources;
+  if (primask == 0U) __enable_irq();
+}
+
+static void WakePending_Clear(uint32_t sources)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_wake_pending &= ~sources;
+  if (primask == 0U) __enable_irq();
+}
+
+static uint32_t WakePending_Take(void)
+{
+  uint32_t pending;
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  pending = g_wake_pending;
+  g_wake_pending = 0U;
+  if (primask == 0U) __enable_irq();
+  return pending;
+}
 
 /* ========================== 全局变量 ========================== */
 
@@ -54,7 +82,6 @@ uint8_t  g_imu_source_fallback_count = 0U;     /**< INT1有效但源寄存器已
 uint8_t IMU_Drain_INT1_Latch(uint8_t *out_wu, uint8_t *out_6d)
 {
   uint8_t wu = 0U, d6d = 0U;
-  uint8_t snapshot_taken = 0U;
 
   if (out_wu != NULL) *out_wu = 0U;
   if (out_6d != NULL) *out_6d = 0U;
@@ -63,12 +90,9 @@ uint8_t IMU_Drain_INT1_Latch(uint8_t *out_wu, uint8_t *out_6d)
     wu = 0U;
     d6d = 0U;
     LSM6DS_Clear_All_Interrupts_Ex(&wu, &d6d);
-    /* 取第一个非空来源快照。后续读取仅用于释放锁存，不能把两个时刻的
-     * 不同来源合并成同一次 WU+6D 事件。 */
-    if (!snapshot_taken && (wu || d6d)) {
+    if (attempt == 0U) {
       if (out_wu != NULL) *out_wu = wu;
       if (out_6d != NULL) *out_6d = d6d;
-      snapshot_taken = 1U;
     }
     HAL_Delay(2U);
     if (HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
@@ -118,6 +142,8 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   uint8_t rtc_event = 0U;
   uint8_t imu_exti_event = 0U;
   uint8_t source_fallback = 0U;
+  uint8_t rtc_arm_failed = 0U;
+  uint32_t wake_pending = 0U;
 
   if (out_wu)   *out_wu = 0;
   if (out_6d)   *out_6d = 0;
@@ -125,7 +151,7 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   if (out_uart) *out_uart = 0;
   if (out_source_fallback) *out_source_fallback = 0U;
 
-  g_uart2_wakeup_flag = 0;
+  WakePending_Clear(WAKE_PENDING_UART);
 
   /* STM32G031 的 USART2 不能直接唤醒 Stop1，临时将 PA3 配为下降沿 EXTI。
    * 0x00 是专用唤醒令牌，收到 READY 后才发送完整命令帧。 */
@@ -165,11 +191,11 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
    * 与当前引脚电平的或逻辑，会把已经回到低电平、且WU/6D源寄存器均为0的旧EX​​TI
    * 当成新事件，导致桌面静置时也触发上报。清除后仍检查实际引脚和EXTI硬件挂起位，
    * 不会丢失这一临界窗口内真正到达的新中断。 */
-  g_imu_exti_wakeup_flag = 0U;
+  WakePending_Clear(WAKE_PENDING_IMU);
   if (HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
                        IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET ||
       __HAL_GPIO_EXTI_GET_IT(IMU_INT1_WAKEUP_Pin) != 0U) {
-    g_imu_exti_wakeup_flag = 1U;
+    WakePending_Set(WAKE_PENDING_IMU);
   }
   __enable_irq();
   /* 网络失败不创建额外RTC重试；只按用户配置的正常心跳周期再次唤醒。 */
@@ -211,31 +237,47 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
 
     /* 上一次 RTC 中断可能在重设定时器后留下 NVIC 挂起位；WFI 前清除，避免误唤醒。 */
     HAL_NVIC_ClearPendingIRQ(RTC_TAMP_IRQn);
-    __disable_irq();
-    g_rtc_wakeup_flag = 0U;
-    __enable_irq();
+    WakePending_Clear(WAKE_PENDING_RTC);
+    if (g_rtc_arm_status != HAL_OK) {
+      /* Do not turn a failed re-arm into a fake RTC event/report. */
+      rtc_arm_failed = 1U;
+      break;
+    }
     HAL_SuspendTick();
 
     /* 消除进入 WFI 前最后的竞争窗口；仅在 WFI 前后短暂屏蔽中断。 */
     __disable_irq();
-    if (g_rtc_arm_status != HAL_OK) {
-      rtc_event = 1U;
-    } else if (g_uart2_wakeup_flag || g_uart2_activity_flag ||
+    wake_pending = g_wake_pending;
+    if (g_uart2_activity_flag ||
         HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET ||
         __HAL_GPIO_EXTI_GET_IT(GPIO_PIN_3) != 0U) {
-      g_uart2_wakeup_flag = 1U;
-    } else if (g_imu_exti_wakeup_flag ||
-        HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
+      wake_pending |= WAKE_PENDING_UART;
+    }
+    if (HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
                          IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET ||
         __HAL_GPIO_EXTI_GET_IT(IMU_INT1_WAKEUP_Pin) != 0U) {
-      g_imu_exti_wakeup_flag = 1U;
-    } else {
+      wake_pending |= WAKE_PENDING_IMU;
+    }
+    if (wake_pending == 0U) {
       entered_stop = 1U;
       HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
     }
 
+    /* WFI 返回时 IRQ 仍被上方的临界区屏蔽。EXTI 可以唤醒 Cortex-M，
+     * 但对应 ISR 要到 __enable_irq() 后才会置 wake_pending；若只在这里
+     * 调 WakePending_Take()，此次 IMU 边沿就会漏过分类流程。直接采样
+     * 硬件挂起位/引脚电平，把本次 Stop1 期间的唤醒原因并入本地快照。 */
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET ||
+        __HAL_GPIO_EXTI_GET_IT(GPIO_PIN_3) != 0U) {
+      wake_pending |= WAKE_PENDING_UART;
+    }
+    if (HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
+                         IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET ||
+        __HAL_GPIO_EXTI_GET_IT(IMU_INT1_WAKEUP_Pin) != 0U) {
+      wake_pending |= WAKE_PENDING_IMU;
+    }
     if (__HAL_RTC_WAKEUPTIMER_GET_FLAG(&hrtc, RTC_FLAG_WUTF) != 0U) {
-      rtc_event = 1U;
+      wake_pending |= WAKE_PENDING_RTC;
       if (g_rtc_hw_wake_count < 0xFFFFU) g_rtc_hw_wake_count++;
     }
 
@@ -244,18 +286,19 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
       SystemClock_Config();
     }
     HAL_ResumeTick();
+    /* Atomic take: new ISRs after this point accumulate for the next cycle. */
+    wake_pending |= WakePending_Take();
     __enable_irq();
 
-    if (g_rtc_wakeup_flag) rtc_event = 1U;
-    g_rtc_wakeup_flag = 0U;
+    rtc_event = (wake_pending & WAKE_PENDING_RTC) ? 1U : 0U;
     if (!rtc_event) {
       g_guard_sleep_accum_sec = 0U;
       break;
     }
 
     /* 维护口或 IMU 中断优先于RTC周期唤醒；真实事件后重新计算心跳周期。 */
-    if (g_uart2_wakeup_flag || g_uart2_activity_flag ||
-        g_imu_exti_wakeup_flag ||
+    if ((wake_pending & (WAKE_PENDING_UART | WAKE_PENDING_IMU)) ||
+        g_uart2_activity_flag ||
         HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
                          IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET ||
         __HAL_GPIO_EXTI_GET_IT(IMU_INT1_WAKEUP_Pin) != 0U) {
@@ -309,7 +352,7 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   }
 
   /* INT1 是 WAKE_UP 与 6D 的或逻辑；先等待 52Hz 嵌入式状态稳定，再读取和清除锁存位。 */
-  if (g_imu_exti_wakeup_flag ||
+  if ((wake_pending & WAKE_PENDING_IMU) ||
       HAL_GPIO_ReadPin(IMU_INT1_WAKEUP_GPIO_Port,
                        IMU_INT1_WAKEUP_Pin) == GPIO_PIN_SET ||
       __HAL_GPIO_EXTI_GET_IT(IMU_INT1_WAKEUP_Pin) != 0U) {
@@ -325,13 +368,14 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   __HAL_GPIO_EXTI_CLEAR_IT(IMU_INT1_WAKEUP_Pin);
   HAL_NVIC_ClearPendingIRQ(IMU_INT1_WAKEUP_EXTI_IRQn);
 
-  __disable_irq();
-  imu_exti_event = g_imu_exti_wakeup_flag;
-  g_imu_exti_wakeup_flag = 0U;
-  __enable_irq();
+  imu_exti_event = (wake_pending & WAKE_PENDING_IMU) ? 1U : 0U;
   if (imu_exti_event && !wu_flag && !d6d_flag) {
-    /* PB1 是 IMU 唤醒 MCU 的直接证据；来源寄存器仅用于分类。来源丢失时
-     * 保持 unknown，3 秒姿态复核确认倾角后才按 6D 上报，绝不伪造 WU。 */
+    /* PB1 已在 Stop1 期间产生了真实唤醒边沿，但读取来源寄存器时两位均已清除。
+     * 本板的历史实测表明这类 "unknown" 多数来自慢速 6D 姿态转换；把它先当
+     * WU 会导致 6D 被误分类或被后续软件复核丢弃。因此保留硬件边沿证据，并按
+     * 6D 事件上报。进入 Stop1 前的残留锁存和 EXTI 标志已在上方显式清除，不会
+     * 落入本分支。 */
+    d6d_flag = 1U;
     source_fallback = 1U;
     if (g_imu_source_fallback_count < 0xFFU)
       g_imu_source_fallback_count++;
@@ -354,6 +398,11 @@ void Enter_Stop1_Mode(uint8_t *out_wu, uint8_t *out_6d,
   if (out_wu)  *out_wu  = wu_flag;
   if (out_6d)  *out_6d  = d6d_flag;
   if (out_rtc) *out_rtc = rtc_event;
-  if (out_uart) *out_uart = g_uart2_wakeup_flag;
+  if (out_uart) *out_uart =
+      (wake_pending & WAKE_PENDING_UART) ? 1U : 0U;
   if (out_source_fallback) *out_source_fallback = source_fallback;
+  if (rtc_arm_failed) {
+    /* Throttle a persistent RTC peripheral fault without creating an MQTT loop. */
+    HAL_Delay(1000U);
+  }
 }

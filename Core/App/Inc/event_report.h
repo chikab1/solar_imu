@@ -29,7 +29,8 @@ void     Write_LE32(uint8_t *p, uint32_t value);
 
 /* 核心上报链路 */
 uint8_t  Capture_Event_And_Start_Modem(EventRecord_t *event,
-                                       uint8_t start_modem);
+                                       uint8_t start_modem,
+                                       uint16_t *out_dynamic_peak_mg);
 uint8_t  Run_Event_Report(uint8_t wu_flag, uint8_t d6d_flag,
                           uint8_t rtc_flag, uint8_t manual,
                           uint8_t source_fallback,

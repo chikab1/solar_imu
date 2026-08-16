@@ -314,29 +314,6 @@ int ML307C_Wait_Network(uint32_t timeout_ms, ML307C_Network_Status_t *status)
     return 1;
 }
 
-int ML307C_Query_Network_Status(ML307C_Network_Status_t *status)
-{
-    char *p;
-
-    if (status == NULL) return 0;
-    status->csq = 99;
-    status->is_attached = 0;
-    if (!ML307C_Is_Powered()) return 0;
-
-    /* CGATT=1 is the direct evidence that packet data is currently attached.
-     * This is a snapshot query, deliberately without the long CEREG retry
-     * loop used by the full reporting path. */
-    if (ML307C_Send_CMD("AT+CGATT?", "OK", 1500) != 1) return 0;
-    if (strstr((char *)s_uart_rx_buf, "+CGATT: 1") != NULL)
-        status->is_attached = 1;
-
-    if (ML307C_Send_CMD("AT+CSQ", "OK", 1500) == 1) {
-        p = strstr((char *)s_uart_rx_buf, "+CSQ:");
-        if (p != NULL) status->csq = atoi(p + 5);
-    }
-    return 1;
-}
-
 /* ================================================================ *
  *  ML307C_MQTT_Connect                                            *
  * ================================================================ */

@@ -112,12 +112,12 @@ void LSM6DS_Complementary_Tilt_Update(float ax, float ay, float az,
 /* 静态全局驱动实例 */
 static stmdev_ctx_t imu_ctx;                 /**< ST寄存器驱动上下文，绑定HAL I2C。 */
 static uint8_t s_sleep_mode_ready = 0U;      /**< 1表示INT1已清除旧标志并完成Stop1布防。 */
-static uint8_t s_active_mode_ready = 0U;     /**< 1表示六轴已在104Hz主动采样模式。 */
+static uint8_t s_active_mode_ready = 0U;     /**< 1表示六轴已在416Hz主动采样模式。 */
 static const uint8_t imu_addr = (0x6A << 1); /**< 7位地址0x6A转换为HAL使用的8位地址。 */
 
-/* 休眠监测时加速度计为52Hz。WAKE_UP_DUR=0不额外延迟触发，
- * 由硬件Wake-Up阈值直接决定唤醒。 */
-#define LSM6DS_WAKE_UP_DURATION 0U
+/* 休眠监测时加速度计为52Hz。WAKE_UP_DUR=2要求Wake-Up滤波结果连续满足约
+ * 2个ODR周期（约38ms），用于滤除手指轻碰和安装件的短促振铃。 */
+#define LSM6DS_WAKE_UP_DURATION 1U
 
 /**
  * @brief ST寄存器驱动的HAL I2C写桥接函数。
@@ -190,9 +190,9 @@ uint8_t LSM6DS_Init(I2C_HandleTypeDef *hi2c)
         return 0;
     }
 
-    /* 加速度计：52Hz, ±2g */
+    /* 加速度计：416Hz, ±2g。6D/WU 同样使用此工作点，缩短姿态转换到中断的延迟。 */
     if (lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
-                                     LSM6DS3TR_C_XL_ODR_52Hz) != 0 ||
+                                     LSM6DS3TR_C_XL_ODR_416Hz) != 0 ||
         lsm6ds3tr_c_xl_full_scale_set(&imu_ctx, LSM6DS3TR_C_2g) != 0) {
         return 0;
     }
@@ -434,7 +434,7 @@ uint8_t LSM6DS_Set_Active_Mode(void)
     if (lsm6ds3tr_c_xl_power_mode_set(&imu_ctx,
                                       LSM6DS3TR_C_XL_HIGH_PERFORMANCE) != 0 ||
         lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
-                                     LSM6DS3TR_C_XL_ODR_104Hz) != 0 ||
+                                     LSM6DS3TR_C_XL_ODR_416Hz) != 0 ||
         lsm6ds3tr_c_gy_power_mode_set(&imu_ctx,
                                       LSM6DS3TR_C_GY_HIGH_PERFORMANCE) != 0 ||
         lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
@@ -466,7 +466,7 @@ uint8_t LSM6DS_Set_Report_Wait_Mode(void)
     if (lsm6ds3tr_c_xl_power_mode_set(&imu_ctx,
                                       LSM6DS3TR_C_XL_HIGH_PERFORMANCE) != 0 ||
         lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
-                                     LSM6DS3TR_C_XL_ODR_52Hz) != 0 ||
+                                     LSM6DS3TR_C_XL_ODR_416Hz) != 0 ||
         lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
                                      LSM6DS3TR_C_GY_ODR_OFF) != 0) {
         return 0;
@@ -483,6 +483,7 @@ static uint8_t LSM6DS_Sleep_Config_Is_Valid(void)
 {
     uint8_t ctrl1_xl;
     uint8_t ctrl2_g;
+    uint8_t ctrl10_c;
     uint8_t tap_cfg;
     uint8_t md1_cfg;
 
@@ -490,6 +491,8 @@ static uint8_t LSM6DS_Sleep_Config_Is_Valid(void)
                              &ctrl1_xl, 1) != 0 ||
         lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_CTRL2_G,
                              &ctrl2_g, 1) != 0 ||
+        lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_CTRL10_C,
+                             &ctrl10_c, 1) != 0 ||
         lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                              &tap_cfg, 1) != 0 ||
         lsm6ds3tr_c_read_reg(&imu_ctx, LSM6DS3TR_C_MD1_CFG,
@@ -497,14 +500,15 @@ static uint8_t LSM6DS_Sleep_Config_Is_Valid(void)
         return 0U;
     }
 
-    return (uint8_t)(((ctrl1_xl & 0xFCU) == 0x30U) &&
+    return (uint8_t)(((ctrl1_xl & 0xFCU) == 0x60U) &&
                      ((ctrl2_g & 0xF0U) == 0x00U) &&
+                     ((ctrl10_c & 0x04U) == 0x04U) &&
                      ((tap_cfg & 0x81U) == 0x81U) &&
                      ((md1_cfg & 0x24U) == 0x24U));
 }
 
 /**
- * @brief 切换到Stop1布防模式：52 Hz加速度计、陀螺仪关闭、WU和6D路由INT1。
+ * @brief 切换到Stop1布防模式：416Hz加速度计、陀螺仪关闭、WU和6D路由INT1。
  * @return 1布防完成或此前已布防，0 I2C配置失败。
  * @details 首次布防会等待传感器稳定并读取源寄存器清除旧锁存，之后再开放INT1。
  */
@@ -527,7 +531,7 @@ uint8_t LSM6DS_Set_Sleep_Mode(void)
     if (lsm6ds3tr_c_xl_power_mode_set(&imu_ctx,
                                       LSM6DS3TR_C_XL_HIGH_PERFORMANCE) != 0 ||
         lsm6ds3tr_c_xl_data_rate_set(&imu_ctx,
-                                     LSM6DS3TR_C_XL_ODR_52Hz) != 0 ||
+                                     LSM6DS3TR_C_XL_ODR_416Hz) != 0 ||
         lsm6ds3tr_c_gy_data_rate_set(&imu_ctx,
                                      LSM6DS3TR_C_GY_ODR_OFF) != 0) {
         return 0;
@@ -759,7 +763,7 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
     if (lsm6ds3tr_c_write_reg(&imu_ctx, LSM6DS3TR_C_TAP_CFG,
                               (uint8_t *)&tap_cfg, 1) != 0) return 0;
 
-    /* 3. WAKE-UP：阈值由wu_reg决定；持续时间为0，不额外延迟触发。 */
+    /* 3. WAKE-UP：阈值由wu_reg决定；持续2个52Hz周期再触发。 */
     if (lsm6ds3tr_c_wkup_threshold_set(&imu_ctx, wu_reg) != 0 ||
         lsm6ds3tr_c_wkup_dur_set(&imu_ctx,
                                  LSM6DS_WAKE_UP_DURATION) != 0) return 0;
@@ -769,6 +773,10 @@ uint8_t LSM6DS_Config_Gatekeeper(uint16_t wu_mg, uint8_t deg_6d)
         lsm6ds3tr_c_4d_mode_set(&imu_ctx, 0) != 0 ||
         lsm6ds3tr_c_6d_feed_data_set(&imu_ctx,
                                      LSM6DS3TR_C_LPF2_FEED) != 0) return 0;
+
+    /* Keep the embedded-function gate explicitly enabled, matching the
+     * standalone 6D setup used elsewhere in this driver. */
+    if (lsm6ds3tr_c_func_en_set(&imu_ctx, 1U) != 0) return 0;
 
     /* 5. 双通道路由 INT1 */
     if (lsm6ds3tr_c_pin_int1_route_get(&imu_ctx, &int1_route) != 0) return 0;

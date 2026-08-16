@@ -21,12 +21,10 @@
 
 /** 与维护协议和低功耗模块共享的异步状态。 */
 volatile PendingCmd_t g_pending_cmd = CMD_NONE;
-volatile uint8_t g_uart2_wakeup_flag = 0U;
+volatile uint32_t g_wake_pending = 0U;
 volatile uint8_t g_uart2_activity_flag = 0U;
 volatile uint8_t g_uart2_rearm_needed = 0U;
 volatile uint8_t g_uart1_rearm_needed = 0U;
-volatile uint8_t g_rtc_wakeup_flag = 0U;
-volatile uint8_t g_imu_exti_wakeup_flag = 0U;
 volatile uint16_t g_imu_exti_wake_count = 0U;
 volatile uint16_t g_rtc_callback_count = 0U;
 
@@ -35,10 +33,41 @@ uint8_t g_report_wu = 0U;
 uint8_t g_report_6d = 0U;
 uint8_t g_report_rtc = 0U;
 uint8_t g_report_source_fallback = 0U;
-uint8_t g_report_include_gps = 1U;
 uint8_t g_report_boot = 0U;
+uint8_t g_report_include_gps = 1U;
 uint8_t g_imu_ok = 0U;
 uint8_t g_reset_reason = 0U;
+
+/* Keep read-modify-write of the shared wake bitmap indivisible even if an
+ * interrupt with a higher priority preempts a callback. */
+static void App_Mark_Wake_Pending(uint32_t source)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_wake_pending |= source;
+  if (primask == 0U) __enable_irq();
+}
+
+/* The first GNSS acquisition is an installation grace period.  Movement while
+ * a technician mounts the unit must not become an IMU event.  Rebuild the IMU
+ * gatekeeper after that report, then atomically discard every latched source,
+ * EXTI edge and software pending bit collected during the grace period. */
+static void App_End_Install_Grace_Period(void)
+{
+  uint32_t primask;
+
+  g_imu_ok = LSM6DS_Config_Gatekeeper(g_cfg.wu_mg,
+                                       (uint8_t)g_cfg.tilt_deg);
+  if (g_imu_ok) g_imu_ok = LSM6DS_Set_Sleep_Mode();
+  (void)IMU_Drain_INT1_Latch(NULL, NULL);
+
+  primask = __get_PRIMASK();
+  __disable_irq();
+  __HAL_GPIO_EXTI_CLEAR_IT(IMU_INT1_WAKEUP_Pin);
+  HAL_NVIC_ClearPendingIRQ(IMU_INT1_WAKEUP_EXTI_IRQn);
+  g_wake_pending &= ~WAKE_PENDING_IMU;
+  if (primask == 0U) __enable_irq();
+}
 
 /**
  * @brief 读取并清除 RCC 复位原因，供首次事件上报。
@@ -74,6 +103,9 @@ void App_Init(void)
   (void)LSM6DS_Set_Sleep_Mode();
 
   g_report_boot = 1U;
+  /* First report obtains the installed position.  IMU activity is intentionally
+   * ignored until this report has finished (installation grace period). */
+  g_report_include_gps = 1U;
   g_pending_cmd = CMD_TEST;
 }
 
@@ -87,18 +119,18 @@ static void App_Run_Pending_Report(void)
   uint8_t rtc = g_report_rtc;
   uint8_t source_fallback = g_report_source_fallback;
   uint8_t include_gps = g_report_include_gps;
+  uint8_t boot_report = g_report_boot;
 
   g_report_wu = 0U;
   g_report_6d = 0U;
   g_report_rtc = 0U;
   g_report_source_fallback = 0U;
-  /* 手动请求的选择仅作用于本次任务；自动唤醒始终保留位置跟踪。 */
   g_report_include_gps = 1U;
   g_pending_cmd = CMD_NONE;
   g_service_busy = 1U;
-  (void)Run_Event_Report(wu, d6d, rtc,
-                         (uint8_t)(!wu && !d6d && !rtc && !source_fallback),
-                         source_fallback, include_gps);
+  (void)Run_Event_Report(wu, d6d, rtc, (uint8_t)(!wu && !d6d && !rtc),
+                          source_fallback, include_gps);
+  if (boot_report) App_End_Install_Grace_Period();
   g_report_boot = 0U;
   g_service_busy = 0U;
   if (g_serial_session_active) g_last_uart2_activity = HAL_GetTick();
@@ -121,7 +153,7 @@ static void App_Enter_Stop_When_Idle(void)
     g_last_uart2_activity = HAL_GetTick();
     ServiceProtocol_SendWakeAck();
   }
-  if (wu || d6d || rtc || fallback) {
+  if (wu || d6d || rtc) {
     g_report_wu = wu;
     g_report_6d = d6d;
     g_report_rtc = rtc;
@@ -174,6 +206,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
   if (huart->Instance == USART2) {
     if (Size > 0U) {
       g_uart2_activity_flag = 1U;
+      App_Mark_Wake_Pending(WAKE_PENDING_UART);
       ServiceProtocol_Feed(g_uart2_drv.dma_rx_buf, Size);
     }
     if (HAL_UARTEx_ReceiveToIdle_IT(&huart2, g_uart2_drv.dma_rx_buf,
@@ -197,6 +230,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   } else if (huart->Instance == USART2) {
     ServiceProtocol_NotifyUartError();
     g_uart2_activity_flag = 1U;
+    App_Mark_Wake_Pending(WAKE_PENDING_UART);
     g_uart2_rearm_needed = 1U;
     __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_PEF | UART_CLEAR_FEF |
                                  UART_CLEAR_NEF | UART_CLEAR_OREF |
@@ -211,7 +245,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc_cb)
 {
   if (hrtc_cb->Instance == RTC) {
-    g_rtc_wakeup_flag = 1U;
+    App_Mark_Wake_Pending(WAKE_PENDING_RTC);
     if (g_rtc_callback_count < 0xFFFFU) g_rtc_callback_count++;
   }
 }
@@ -223,7 +257,7 @@ void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc_cb)
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == IMU_INT1_WAKEUP_Pin) {
-    g_imu_exti_wakeup_flag = 1U;
+    App_Mark_Wake_Pending(WAKE_PENDING_IMU);
     if (g_imu_exti_wake_count < 0xFFFFU) g_imu_exti_wake_count++;
   }
 }
@@ -235,7 +269,7 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_3) {
-    g_uart2_wakeup_flag = 1U;
+    App_Mark_Wake_Pending(WAKE_PENDING_UART);
     g_uart2_activity_flag = 1U;
   }
 }

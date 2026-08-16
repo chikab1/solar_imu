@@ -86,19 +86,18 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
     break;
   }
   case SERVICE_CMD_RUN_REPORT:
-    if (g_pending_cmd != CMD_NONE || g_service_busy) {
-      status = SERVICE_STATUS_BUSY;
-    } else if (frame->length > 1U) {
-      status = SERVICE_STATUS_BAD_LENGTH;
-    } else if (frame->length == 1U && frame->payload[0] > 1U) {
+    if (frame->length > 1U ||
+        (frame->length == 1U && frame->payload[0] > 1U)) {
       status = SERVICE_STATUS_BAD_VALUE;
+    } else if (g_pending_cmd != CMD_NONE || g_service_busy) {
+      status = SERVICE_STATUS_BUSY;
     } else {
       g_report_wu = 0U;
       g_report_6d = 0U;
       g_report_rtc = 0U;
-      g_report_source_fallback = 0U;
-      /* 兼容旧上位机的空负载：仍按“携带GPS”处理。 */
-      g_report_include_gps = (frame->length == 0U) ? 1U : frame->payload[0];
+      /* Empty payload remains compatible with older desktop tools: include GPS. */
+      g_report_include_gps = (frame->length == 0U || frame->payload[0] != 0U) ?
+                             1U : 0U;
       g_pending_cmd = CMD_TEST;
     }
     break;
@@ -167,9 +166,6 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
     float voltage = ADC_Get_Battery_Voltage_Avg();
     (void)voltage;
     Turn_On_ML307C();
-    /* 开机脉冲结束后以STATE为准确认硬件已实际上电。上位机收到OK只表示
-     * 模组电源已启动；网络注册仍由“读取全部状态”的网络检测确认。 */
-    if (!ML307C_Is_Powered()) status = SERVICE_STATUS_FAILED;
     break;
   }
   case SERVICE_CMD_MODEM_OFF:
@@ -227,23 +223,6 @@ void Handle_Service_Frame(const ServiceFrame_t *frame)
       /* response[1..15]保持为0；上位机可据imei_valid提示先完成一次4G上报。 */
       response_len = 28U;
     }
-    break;
-  }
-  case SERVICE_CMD_GET_NETWORK_STATUS: {
-    ML307C_Network_Status_t network = {99, 0};
-    uint8_t powered;
-
-    if (frame->length != 0U) {
-      status = SERVICE_STATUS_BAD_LENGTH;
-      break;
-    }
-    powered = ML307C_Is_Powered();
-    if (powered) (void)ML307C_Query_Network_Status(&network);
-    response[0] = powered;
-    response[1] = network.is_attached ? 1U : 0U;
-    response[2] = (network.csq >= 0 && network.csq <= 99) ?
-                  (uint8_t)network.csq : 99U;
-    response_len = 3U;
     break;
   }
   case SERVICE_CMD_GET_PITCH:

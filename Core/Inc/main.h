@@ -85,12 +85,14 @@ void SystemClock_Config(void);
 extern volatile PendingCmd_t g_pending_cmd;
 
 /* Stop1唤醒源和串口恢复 flags (HAL回调写入) */
-extern volatile uint8_t  g_uart2_wakeup_flag;
+/* Stop1 wake sources: ISRs only set bits; low-power flow takes them atomically. */
+#define WAKE_PENDING_UART  (1UL << 0)
+#define WAKE_PENDING_RTC   (1UL << 1)
+#define WAKE_PENDING_IMU   (1UL << 2)
+extern volatile uint32_t g_wake_pending;
 extern volatile uint8_t  g_uart2_activity_flag;
 extern volatile uint8_t  g_uart2_rearm_needed;
 extern volatile uint8_t  g_uart1_rearm_needed;
-extern volatile uint8_t  g_rtc_wakeup_flag;
-extern volatile uint8_t  g_imu_exti_wakeup_flag;
 extern volatile uint16_t g_imu_exti_wake_count;
 extern volatile uint16_t g_rtc_callback_count;
 
@@ -99,8 +101,8 @@ extern uint8_t  g_report_wu;
 extern uint8_t  g_report_6d;
 extern uint8_t  g_report_rtc;
 extern uint8_t  g_report_source_fallback;
-extern uint8_t  g_report_include_gps;
 extern uint8_t  g_report_boot;
+extern uint8_t  g_report_include_gps;
 
 /* 启动诊断 */
 extern uint8_t g_imu_ok;

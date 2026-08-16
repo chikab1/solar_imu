@@ -31,7 +31,6 @@ typedef enum {
     SERVICE_CMD_GET_IMU_DIAG = 0x09, /**< 读取IMU寄存器和中断统计。 */
     SERVICE_CMD_SET_MOUNT    = 0x0A, /**< 设置固定安装零度轴。 */
     SERVICE_CMD_GET_DEVICE_ID = 0x0B, /**< 读取缓存IMEI、MCU UID和实际上行MQTT主题。 */
-    SERVICE_CMD_GET_NETWORK_STATUS = 0x0C, /**< 查询当前4G分组网络附着和信号。 */
     SERVICE_CMD_GET_PITCH    = 0x10, /**< 读取传感器坐标系的Pitch。 */
     SERVICE_CMD_GET_ROLL     = 0x11, /**< 读取传感器坐标系的Roll。 */
     SERVICE_CMD_GET_ANGLE    = 0x12, /**< 同时读取传感器坐标系的Pitch和Roll。 */

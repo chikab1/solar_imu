@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGridLayout,
 
 from app.protocol.commands import Command, STATUS_TEXT, Status, report_payload
 from app.protocol.models import (DeviceIdentity, DeviceStatus, EventRecord,
-                                  ImuDiagnostic, ImuLive, NetworkStatus)
+                                  ImuDiagnostic, ImuLive)
 from .widgets import AttitudePreview3D, StatusCard
 
 
@@ -97,7 +97,6 @@ class OverviewPage(QWidget):
         super().__init__()
         self.client = client
         self._read_all_pending = False
-        self._network_check_pending = False
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         top.addWidget(page_title("设备总览"))
@@ -110,7 +109,7 @@ class OverviewPage(QWidget):
         cards = QGridLayout()
         self.cards = {
             "voltage": StatusCard("设备电压", "--", "V"),
-            "network": StatusCard("4G网络", "--", ""),
+            "network": StatusCard("4G模块", "--", ""),
             "imu": StatusCard("姿态传感器", "--", ""),
             "queue": StatusCard("待发送事件", "--", "条"),
         }
@@ -153,9 +152,8 @@ class OverviewPage(QWidget):
         # 队列索引必须小于队列数量。先读取状态，确认有待发送事件后才读取第0条，
         # 避免空队列返回BAD_VALUE被误显示为设备参数错误。
         self._read_all_pending = True
-        self._network_check_pending = True
         for cmd in (Command.GET_STATUS, Command.GET_IMU_DIAG,
-                    Command.GET_DEVICE_ID, Command.GET_NETWORK_STATUS):
+                    Command.GET_DEVICE_ID):
             self.client.request(cmd)
 
     def _rows(self, rows):
@@ -166,26 +164,17 @@ class OverviewPage(QWidget):
 
     def on_response(self, command, status, data):
         if status != Status.OK:
-            if command == Command.GET_NETWORK_STATUS:
-                self._network_check_pending = False
-                self.cards["network"].set_value("暂不可检测")
             if command == Command.READ_QUEUE and status == Status.BAD_VALUE:
                 self.queue_text.setText("暂无未发送事件")
             return
         if command == Command.GET_STATUS:
             value = DeviceStatus.parse(data)
             self.cards["voltage"].set_value(f"{value.voltage_mv / 1000:.2f}")
-            # GET_STATUS中的attached属于上一次上报；当前状态由专用网络快照命令更新。
-            self.cards["network"].set_value(
-                "正在检测" if value.modem_on and self._network_check_pending else
-                ("已开启（未检测）" if value.modem_on else "已关闭")
-            )
+            self.cards["network"].set_value("已开启" if value.modem_on else "已关闭")
             self.cards["imu"].set_value("正常" if value.imu_ok else "需检查")
             self.cards["queue"].set_value(value.queue_count)
-            last_network = "已附着" if value.attached else "未附着或尚未完成上报"
             self._rows([
-                ("最近一次上报网络", last_network),
-                ("4G模块电源", "已开启" if value.modem_on else "已关闭"),
+                ("4G模块状态", "已开启" if value.modem_on else "已关闭"),
                 ("信号强度", f"{value.csq}（0~31，越大越好）" if value.csq != 99 else "暂无信号"),
                 ("定时唤醒周期", f"{value.sleep_sec / 60:g} 分钟"),
                 ("最近上报", "成功" if value.last_report_ok else "未成功或暂无记录"),
@@ -205,16 +194,6 @@ class OverviewPage(QWidget):
             self.imei.setText(value.imei if value.imei_valid else "尚未读取（完成一次4G上报后可用）")
             self.uid.setText(value.mcu_uid)
             self.topic.setText(value.mqtt_topic or "尚未生成")
-        elif command == Command.GET_NETWORK_STATUS:
-            value = NetworkStatus.parse(data)
-            self._network_check_pending = False
-            if not value.modem_on:
-                self.cards["network"].set_value("已关闭")
-            elif value.attached:
-                suffix = f"（信号 {value.csq}）" if value.csq != 99 else ""
-                self.cards["network"].set_value(f"已连接{suffix}")
-            else:
-                self.cards["network"].set_value("未连接")
         elif command == Command.READ_QUEUE:
             count, index = data[:2]
             event = EventRecord.parse(data[2:])

@@ -12,7 +12,7 @@ extern "C" {
 
 /* Exported functions prototypes ---------------------------------------------*/
 /**
- * @brief 绑定I2C、校验WHO_AM_I并把加速度计/陀螺仪初始化为52 Hz。
+ * @brief 绑定I2C、校验WHO_AM_I并把加速度计初始化为416 Hz。
  * @param hi2c 与LSM6DS3TR-C连接的HAL I2C句柄，本项目传`&hi2c2`。
  * @return 1初始化成功；0表示I2C失败或器件ID不匹配。
  * @note 在MX_I2C2_Init()之后调用一次，再调用LSM6DS_Config_Gatekeeper()。
@@ -34,7 +34,7 @@ uint8_t LSM6DS_Read_Storage(float *acc_mg, float *gyro_dps);
  * @param pitch_cdeg 输出Pitch，单位0.01度。
  * @param roll_cdeg 输出Roll，单位0.01度。
  * @return 1成功，0表示配置、I2C或数据有效性检查失败。
- * @note 首次调用会切换到104Hz主动模式；进入Stop1前仍由LSM6DS_Set_Sleep_Mode重新布防。
+ * @note 首次调用会切换到416Hz主动模式；进入Stop1前仍由LSM6DS_Set_Sleep_Mode重新布防。
  */
 uint8_t LSM6DS_Read_Live(int16_t acc_mg[3], int16_t gyro_dps[3],
                          int16_t *pitch_cdeg, int16_t *roll_cdeg);
@@ -72,7 +72,7 @@ uint8_t IMU_Get_Roll(int16_t *roll_cdeg);
 uint8_t LSM6DS_Set_Active_Mode(void);
 
 /**
- * @brief 进入上报等待工作点：加速度计52 Hz、陀螺仪关闭，并保持INT1路由关闭。
+ * @brief 进入上报等待工作点：加速度计416 Hz、陀螺仪关闭，并保持INT1路由关闭。
  * @return 1成功，0表示I2C配置失败。
  * @note 用于IMU采样结束后的联网、MQTT和GNSS阶段，避免一次事件处理完成前
  *       再次锁存WU/6D；完整上报结束后调用LSM6DS_Set_Sleep_Mode()重新布防。
@@ -80,7 +80,7 @@ uint8_t LSM6DS_Set_Active_Mode(void);
 uint8_t LSM6DS_Set_Report_Wait_Mode(void);
 
 /**
- * @brief 进入低功耗监测工作点：加速度计52 Hz、陀螺仪关闭、WU+6D路由INT1。
+ * @brief 进入监测工作点：加速度计416 Hz、陀螺仪关闭、WU+6D路由INT1。
  * @return 1成功，0表示I2C配置失败。
  * @note 该函数可重复调用；已布防时直接返回成功，避免误清除新事件。
  */
@@ -152,7 +152,7 @@ uint8_t LSM6DS_Clear_6D_Wakeup(void);
   *                  可填范围: 0 ~ 1968，步进 ~31.25mg (硬件 0~63 级)。
   *                  例如: 填 100  → 约 100mg 唤醒 (轻敲)
   *                        填 300  → 约 300mg 唤醒 (用力敲)
- *                        填 500  → 约 500mg 唤醒 (当前推荐默认值)
+  *                        填 750  → 约 750mg 唤醒 (户外路牌推荐默认值)
   *                  实际值会就近取整到硬件支持的档位。
   *
   * @param  deg_6d:  6D 倾角唤醒阈值，单位 ° (度)

@@ -120,13 +120,6 @@ int  ML307C_MQTT_PublishEx(char *topic, char *payload, uint8_t dup);
  */
 int  ML307C_Wait_Network(uint32_t timeout_ms, ML307C_Network_Status_t *status);
 
-/**
- * @brief 快速查询当前4G分组网络状态，不等待网络注册。
- * @param status 输出附着状态和CSQ，不能为NULL。
- * @return 1收到模组对查询的响应，0模组未上电或AT查询失败。
- */
-int  ML307C_Query_Network_Status(ML307C_Network_Status_t *status);
-
 /** @brief 返回内部AT响应缓冲区，仅在下一条AT命令前有效。 */
 char* ML307C_Get_RxBuffer(void);
 
