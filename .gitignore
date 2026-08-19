@@ -4,6 +4,7 @@ pc_tool/venv313/
 pc_tool/.recovered_v101/
 pc_tool/.tools/
 pc_tool/build/
+pc_tool/data/
 pc_tool/dist/
 pc_tool/release_build/
 pc_tool/release_dist/
