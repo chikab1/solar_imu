@@ -1,15 +1,18 @@
 from datetime import datetime
+import math
+from pathlib import Path
 import struct
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
 from app.protocol.commands import Command, STATUS_TEXT, Status, report_payload
 from app.protocol.models import (DeviceIdentity, DeviceStatus, EventRecord,
                                   ImuDiagnostic, ImuLive)
-from .widgets import AttitudePreview3D, StatusCard
+from app.telemetry_recorder import TelemetryRecorder
+from .widgets import AttitudePreview3D, MultiLineChart, StatusCard
 
 
 def page_title(text: str):
@@ -24,12 +27,88 @@ def set_combo_value(combo: QComboBox, value):
         combo.setCurrentIndex(index)
 
 
+class RecordingControls(QWidget):
+    SETTINGS_KEY = "telemetry/record_directory"
+
+    def __init__(self, parent, category, fieldnames):
+        super().__init__(parent)
+        self.settings = QSettings("SolarIMU", "PC Tool")
+        self.recorder = TelemetryRecorder(category, fieldnames)
+        self.directory = self.settings.value(self.SETTINGS_KEY, "")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.choose_button = QPushButton("选择保存文件夹")
+        self.record_button = QPushButton("开始记录")
+        self.status_label = QLabel()
+        self.status_label.setObjectName("hintLabel")
+        layout.addWidget(self.choose_button)
+        layout.addWidget(self.record_button)
+        layout.addWidget(self.status_label)
+        self.choose_button.clicked.connect(self.choose_directory)
+        self.record_button.clicked.connect(self.toggle_recording)
+        self._update_status()
+
+    @property
+    def is_recording(self):
+        return self.recorder.is_recording
+
+    def choose_directory(self):
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择遥测数据保存文件夹", self.directory or "")
+        if selected:
+            self.directory = selected
+            self.settings.setValue(self.SETTINGS_KEY, selected)
+            self.settings.sync()
+            self._update_status()
+
+    def toggle_recording(self):
+        if self.is_recording:
+            self.stop()
+            return
+        if not self.directory or not Path(self.directory).is_dir():
+            QMessageBox.information(self, "未选择保存文件夹", "请先选择一个有效的保存文件夹。")
+            return
+        try:
+            path = self.recorder.start(self.directory)
+        except (OSError, ValueError) as exc:
+            self.status_label.setText(f"记录失败：{exc}")
+            return
+        self.record_button.setText("停止记录")
+        self.status_label.setText(f"记录中：{path.name}")
+
+    def write(self, values):
+        if not self.is_recording:
+            return
+        try:
+            path = self.recorder.write(values)
+        except OSError as exc:
+            self.status_label.setText(f"记录失败：{exc}")
+            self.record_button.setText("开始记录")
+            return
+        self.status_label.setText(f"记录中：{path.name}")
+
+    def stop(self):
+        self.recorder.stop()
+        self.record_button.setText("开始记录")
+        self._update_status()
+
+    def _update_status(self):
+        if self.is_recording:
+            return
+        if self.directory and Path(self.directory).is_dir():
+            self.status_label.setText(f"目录：{Path(self.directory).name}")
+        else:
+            self.status_label.setText("未选择目录")
+
+
 class LiveAttitudePage(QWidget):
     def __init__(self, client):
         super().__init__()
         self.client = client
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
+        self.recording = RecordingControls(
+            self, "attitude", ("timestamp", "pitch_deg", "roll_deg"))
         layout = QVBoxLayout(self)
         layout.addWidget(page_title("实时姿态"))
         controls = QHBoxLayout()
@@ -44,6 +123,7 @@ class LiveAttitudePage(QWidget):
         controls.addWidget(self.interval)
         controls.addStretch()
         controls.addWidget(self.start_button)
+        controls.addWidget(self.recording)
         layout.addLayout(controls)
         cards = QHBoxLayout()
         self.pitch_card = StatusCard("Pitch", "--", "°")
@@ -60,6 +140,7 @@ class LiveAttitudePage(QWidget):
         self.interval.currentIndexChanged.connect(self._interval_changed)
         client.response.connect(self.on_response)
         client.disconnected.connect(self.stop_reading)
+        client.disconnected.connect(self.stop_recording)
 
     def toggle(self):
         if self.timer.isActive():
@@ -78,6 +159,9 @@ class LiveAttitudePage(QWidget):
         self.timer.stop()
         self.start_button.setText("开始读取")
 
+    def stop_recording(self):
+        self.recording.stop()
+
     def _interval_changed(self):
         if self.timer.isActive():
             self.timer.start(self.interval.currentData())
@@ -90,6 +174,8 @@ class LiveAttitudePage(QWidget):
         self.pitch_card.set_value(f"{pitch:.2f}")
         self.roll_card.set_value(f"{roll:.2f}")
         self.preview.set_attitude(pitch, roll)
+        self.recording.write({"pitch_deg": f"{pitch:.2f}",
+                              "roll_deg": f"{roll:.2f}"})
 
 
 class OverviewPage(QWidget):
@@ -389,8 +475,20 @@ class SixAxisPage(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(200)
         self.timer.timeout.connect(self._poll)
-        layout = QVBoxLayout(self)
+        self.recording = RecordingControls(
+            self,
+            "six_axis",
+            ("timestamp", "acc_x_mg", "acc_y_mg", "acc_z_mg", "acc_total_mg",
+             "gyro_x_dps", "gyro_y_dps", "gyro_z_dps", "pitch_deg", "roll_deg"),
+        )
+        root = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.addWidget(page_title("六轴数据"))
+
         controls = QHBoxLayout()
         self.acc_enable = QCheckBox("加速度")
         self.gyro_enable = QCheckBox("角速度")
@@ -399,33 +497,91 @@ class SixAxisPage(QWidget):
             item.setChecked(True)
             controls.addWidget(item)
         controls.addStretch()
+        self.clear_button = QPushButton("清空曲线")
         self.start = QPushButton("开始读取")
         self.start.setObjectName("primaryButton")
         self.start.clicked.connect(self.toggle)
+        self.clear_button.clicked.connect(self.clear_history)
+        controls.addWidget(self.clear_button)
         controls.addWidget(self.start)
+        controls.addWidget(self.recording)
         layout.addLayout(controls)
+
         self.groups = {}
         grid = QGridLayout()
-        labels = (("acc", "加速度", ("X", "Y", "Z"), "mg"),
-                  ("gyro", "角速度", ("X", "Y", "Z"), "°/s"),
-                  ("angle", "姿态角", ("Pitch", "Roll"), "°"))
-        for col, (key, title, axes, unit) in enumerate(labels):
+        acc_box = QGroupBox("加速度")
+        acc_layout = QGridLayout(acc_box)
+        self.acc_values = {}
+        for row, axis in enumerate(("X", "Y", "Z")):
+            acc_layout.addWidget(QLabel(axis), row, 0)
+            value = QLabel("-- mg")
+            acc_layout.addWidget(value, row, 1)
+            self.acc_values[axis] = value
+        acc_layout.addWidget(QLabel("总加速度"), 0, 2)
+        self.total_acc_value = QLabel("-- mg")
+        acc_layout.addWidget(self.total_acc_value, 0, 3)
+        self.groups["acc"] = acc_box
+        grid.addWidget(acc_box, 0, 0)
+
+        for col, (key, title, axes, unit) in enumerate((
+            ("gyro", "角速度", ("X", "Y", "Z"), "°/s"),
+            ("angle", "姿态角", ("Pitch", "Roll"), "°"),
+        ), start=1):
             box = QGroupBox(title)
             form = QFormLayout(box)
             values = []
             for axis in axes:
-                label = QLabel(f"-- {unit}")
-                form.addRow(axis, label)
-                values.append(label)
-            self.groups[key] = (box, values)
+                value = QLabel(f"-- {unit}")
+                form.addRow(axis, value)
+                values.append(value)
+            self.groups[key] = box
+            setattr(self, f"{key}_values", values)
             grid.addWidget(box, 0, col)
         layout.addLayout(grid)
+
+        self.acc_chart = MultiLineChart(
+            "加速度历史", "mg",
+            (("X", "#df4a4a"), ("Y", "#36a96d"),
+             ("Z", "#2d77d1"), ("总加速度", "#9a5ec5")),
+        )
+        self.gyro_chart = MultiLineChart(
+            "角速度历史", "°/s",
+            (("X", "#df4a4a"), ("Y", "#36a96d"), ("Z", "#2d77d1")),
+        )
+        self.angle_chart = MultiLineChart(
+            "姿态角历史", "°",
+            (("Pitch", "#1688c8"), ("Roll", "#f29d38")),
+        )
+        self.chart_boxes = {
+            "acc": self._chart_box("加速度历史曲线", self.acc_chart),
+            "gyro": self._chart_box("角速度历史曲线", self.gyro_chart),
+            "angle": self._chart_box("姿态角历史曲线", self.angle_chart),
+        }
+        for box in self.chart_boxes.values():
+            layout.addWidget(box)
         layout.addStretch()
-        self.acc_enable.toggled.connect(self.groups["acc"][0].setVisible)
-        self.gyro_enable.toggled.connect(self.groups["gyro"][0].setVisible)
-        self.angle_enable.toggled.connect(self.groups["angle"][0].setVisible)
+        scroll.setWidget(content)
+        root.addWidget(scroll)
+
+        self.acc_enable.toggled.connect(
+            lambda visible: self._set_section_visible("acc", visible))
+        self.gyro_enable.toggled.connect(
+            lambda visible: self._set_section_visible("gyro", visible))
+        self.angle_enable.toggled.connect(
+            lambda visible: self._set_section_visible("angle", visible))
         client.response.connect(self.on_response)
         client.disconnected.connect(self.stop_reading)
+        client.disconnected.connect(self.stop_recording)
+
+    @staticmethod
+    def _chart_box(title, chart):
+        box = QGroupBox(title)
+        QVBoxLayout(box).addWidget(chart)
+        return box
+
+    def _set_section_visible(self, key, visible):
+        self.groups[key].setVisible(visible)
+        self.chart_boxes[key].setVisible(visible)
 
     def toggle(self):
         if self.timer.isActive():
@@ -444,16 +600,48 @@ class SixAxisPage(QWidget):
         self.timer.stop()
         self.start.setText("开始读取")
 
+    def stop_recording(self):
+        self.recording.stop()
+
+    def clear_history(self):
+        self.acc_chart.clear()
+        self.gyro_chart.clear()
+        self.angle_chart.clear()
+
     def on_response(self, command, status, data):
         if command != Command.GET_IMU_LIVE or status != Status.OK:
             return
         value = ImuLive.parse(data)
-        for label, number in zip(self.groups["acc"][1], (value.acc_x, value.acc_y, value.acc_z)):
-            label.setText(f"{number} mg")
-        for label, number in zip(self.groups["gyro"][1], (value.gyro_x, value.gyro_y, value.gyro_z)):
+        total_acc = math.sqrt(
+            value.acc_x ** 2 + value.acc_y ** 2 + value.acc_z ** 2)
+        for axis, number in zip(("X", "Y", "Z"),
+                                (value.acc_x, value.acc_y, value.acc_z)):
+            self.acc_values[axis].setText(f"{number} mg")
+        self.total_acc_value.setText(f"{total_acc:.1f} mg")
+        for label, number in zip(self.gyro_values,
+                                 (value.gyro_x, value.gyro_y, value.gyro_z)):
             label.setText(f"{number} °/s")
-        for label, number in zip(self.groups["angle"][1], (value.pitch_cdeg / 100, value.roll_cdeg / 100)):
+        pitch = value.pitch_cdeg / 100
+        roll = value.roll_cdeg / 100
+        for label, number in zip(self.angle_values, (pitch, roll)):
             label.setText(f"{number:.2f} °")
+
+        self.acc_chart.append({"X": value.acc_x, "Y": value.acc_y,
+                               "Z": value.acc_z, "总加速度": total_acc})
+        self.gyro_chart.append({"X": value.gyro_x, "Y": value.gyro_y,
+                                "Z": value.gyro_z})
+        self.angle_chart.append({"Pitch": pitch, "Roll": roll})
+        self.recording.write({
+            "acc_x_mg": value.acc_x,
+            "acc_y_mg": value.acc_y,
+            "acc_z_mg": value.acc_z,
+            "acc_total_mg": f"{total_acc:.1f}",
+            "gyro_x_dps": value.gyro_x,
+            "gyro_y_dps": value.gyro_y,
+            "gyro_z_dps": value.gyro_z,
+            "pitch_deg": f"{pitch:.2f}",
+            "roll_deg": f"{roll:.2f}",
+        })
 
 
 class SerialPage(QWidget):

@@ -84,12 +84,14 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         content.addWidget(self.stack, 1)
         outer.addLayout(content, 1)
+        self.live_attitude_page = LiveAttitudePage(self.client)
+        self.six_axis_page = SixAxisPage(self.client)
         pages = [
-            ("实时姿态", LiveAttitudePage(self.client)),
+            ("实时姿态", self.live_attitude_page),
             ("设备总览", OverviewPage(self.client)),
             ("参数设置", ConfigPage(self.client)),
             ("4G与上报", ModemPage(self.client)),
-            ("六轴数据", SixAxisPage(self.client)),
+            ("六轴数据", self.six_axis_page),
             ("通信记录", SerialPage(self.client)),
             ("MQTT远程消息", MqttPage(self.mqtt_client)),
             ("关于", AboutPage()),
@@ -217,6 +219,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(100, self._disconnect_after_sleep)
 
     def closeEvent(self, event):
+        self.live_attitude_page.stop_recording()
+        self.six_axis_page.stop_recording()
         self.mqtt_client.close()
         self.client.disconnect_device()
         super().closeEvent(event)

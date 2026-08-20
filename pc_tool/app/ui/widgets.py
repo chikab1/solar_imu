@@ -77,6 +77,92 @@ class LineChart(QWidget):
             painter.drawPolyline(points)
 
 
+class MultiLineChart(QWidget):
+    """Bounded, dependency-free history plot for related telemetry series."""
+
+    def __init__(self, title, unit, series, parent=None, max_samples=300):
+        super().__init__(parent)
+        self.setMinimumHeight(190)
+        self.title = title
+        self.unit = unit
+        self.series = {
+            name: (deque(maxlen=max_samples), QColor(color))
+            for name, color in series
+        }
+        self.visible = {name: True for name in self.series}
+
+    def append(self, values):
+        for name, (samples, _color) in self.series.items():
+            samples.append(float(values[name]))
+        self.update()
+
+    def clear(self):
+        for samples, _color in self.series.values():
+            samples.clear()
+        self.update()
+
+    def set_series_visible(self, name, visible):
+        if name in self.visible:
+            self.visible[name] = visible
+            self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        rect = self.rect().adjusted(48, 32, -16, -28)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        painter.setPen(QColor("#31516c"))
+        painter.drawText(12, 21, self.title)
+        legend_items = [
+            (name, color)
+            for name, (_samples, color) in self.series.items()
+            if self.visible[name]
+        ]
+        legend_width = sum(
+            18 + painter.fontMetrics().horizontalAdvance(name) + 14
+            for name, _color in legend_items
+        )
+        legend_x = max(rect.left(), rect.right() - legend_width)
+        for name, color in legend_items:
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(legend_x, 19, legend_x + 14, 19)
+            painter.setPen(QColor("#61758a"))
+            painter.drawText(legend_x + 18, 23, name)
+            legend_x += 18 + painter.fontMetrics().horizontalAdvance(name) + 14
+
+        painter.setPen(QPen(QColor("#dce6f0"), 1))
+        for index in range(5):
+            y = rect.top() + index * rect.height() / 4
+            painter.drawLine(rect.left(), int(y), rect.right(), int(y))
+        painter.drawLine(rect.center().x(), rect.top(), rect.center().x(), rect.bottom())
+
+        values = [
+            value
+            for name, (samples, _color) in self.series.items()
+            if self.visible[name]
+            for value in samples
+        ]
+        limit = max(1.0, max((abs(value) for value in values), default=1.0) * 1.15)
+        painter.setPen(QColor("#71849a"))
+        painter.drawText(4, rect.top() + 5, f"+{limit:.0f} {self.unit}")
+        painter.drawText(12, rect.center().y() + 5, f"0 {self.unit}")
+        painter.drawText(4, rect.bottom(), f"-{limit:.0f} {self.unit}")
+
+        for name, (samples, color) in self.series.items():
+            if not self.visible[name] or len(samples) < 2:
+                continue
+            points = []
+            for index, value in enumerate(samples):
+                x = rect.left() + index * rect.width() / (samples.maxlen - 1)
+                y = rect.center().y() - value / limit * rect.height() / 2
+                points.append(QPointF(x, y))
+            painter.setPen(QPen(color, 2))
+            painter.drawPolyline(QPolygonF(points))
+
+
 class AttitudePreview3D(QWidget):
     """A perspective preview driven only by the available Pitch and Roll."""
 
